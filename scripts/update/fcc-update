@@ -1,18 +1,23 @@
 #!/bin/sh
+# Duo's FCC updater. FCC runs from the `duo` branch of ~/Builds/fcc: upstream free-claude-code
+# plus Duo's own changes, so updating never overwrites them.
+#   fcc-update             reinstall from the duo branch (fast-forwards from a `duo` remote first, if set)
+#   fcc-update --upstream  merge the newest upstream release tag into the duo branch, then reinstall
 set -eu
-status=0
-release_version=$("$(dirname "$0")/_fcc-update-check" --print-version) || status=$?
-case "$status" in
-    0) exit 0 ;;
-    10) ;;
-    *) exit "$status" ;;
-esac
-case "$release_version" in
-    ''|*[!0-9.]*) printf 'error: Invalid FCC update version.\n' >&2; exit 1 ;;
-esac
-if ! printf '%s\n' "$release_version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
-    printf 'error: Invalid FCC update version.\n' >&2
-    exit 1
+repo=${FCC_REPO:-$HOME/Builds/fcc}
+cd "$repo"
+[ "$(git branch --show-current)" = duo ] || { printf 'error: %s is not on the duo branch\n' "$repo" >&2; exit 1; }
+[ -z "$(git status --porcelain)" ] || { printf 'error: %s has uncommitted changes\n' "$repo" >&2; exit 1; }
+if git remote get-url duo >/dev/null 2>&1; then git pull --ff-only duo duo; fi
+cons=$(mktemp); trap 'rm -f "$cons"' EXIT
+if [ "${1:-}" = --upstream ]; then
+    git fetch --tags origin
+    tag=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+    git merge --no-edit "$tag" || { printf 'error: merging %s conflicts; resolve in %s, commit, then run fcc-update\n' "$tag" "$repo" >&2; exit 1; }
+else
+    # Keep the dependency versions FCC already runs with; only Duo's code changes.
+    tool=$(uv tool dir)/free-claude-code
+    [ -x "$tool/bin/python" ] && uv pip freeze --python "$tool/bin/python" | grep -v '^free-claude-code' > "$cons" || true
 fi
-installer=$(curl -fsSL "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/v$release_version/scripts/install.sh")
-FCC_INSTALL_VERSION=$release_version exec sh -c "$installer" sh "$@"
+uv tool install --force --constraints "$cons" "$repo"
+printf 'FCC installed from the duo branch (%s). Restart fcc-server to load it.\n' "$(git rev-parse --short HEAD)"
