@@ -1,23 +1,24 @@
 #!/bin/sh
-# Duo's FCC updater. FCC runs from the `duo` branch of ~/Builds/fcc: upstream free-claude-code
-# plus Duo's own changes, so updating never overwrites them.
-#   fcc-update             reinstall from the duo branch (fast-forwards from a `duo` remote first, if set)
-#   fcc-update --upstream  merge the newest upstream release tag into the duo branch, then reinstall
+# Duo's FCC updater. FCC runs from the `duo` branch of ~/Builds/fcc: upstream free-claude-code plus Duo's own
+# changes, so updating never overwrites them. Duo's Updates page merges each new upstream release into the branch
+# (conflicts resolved by Duo's providers, gated on upstream's test suite) and runs this to reinstall.
+#   fcc-update             reinstall from the duo branch (fast-forwards from a `duo` remote first, if one is set)
+#   fcc-update --upstream  merge the newest upstream release tag into the duo branch by hand, then reinstall
 set -eu
 repo=${FCC_REPO:-$HOME/Builds/fcc}
 cd "$repo"
 [ "$(git branch --show-current)" = duo ] || { printf 'error: %s is not on the duo branch\n' "$repo" >&2; exit 1; }
 [ -z "$(git status --porcelain)" ] || { printf 'error: %s has uncommitted changes\n' "$repo" >&2; exit 1; }
 if git remote get-url duo >/dev/null 2>&1; then git pull --ff-only duo duo; fi
-cons=$(mktemp); trap 'rm -f "$cons"' EXIT
 if [ "${1:-}" = --upstream ]; then
     git fetch --tags origin
     tag=$(git tag -l 'v*' --sort=-v:refname | head -n1)
     git merge --no-edit "$tag" || { printf 'error: merging %s conflicts; resolve in %s, commit, then run fcc-update\n' "$tag" "$repo" >&2; exit 1; }
-else
-    # Keep the dependency versions FCC already runs with; only Duo's code changes.
-    tool=$(uv tool dir)/free-claude-code
-    [ -x "$tool/bin/python" ] && uv pip freeze --python "$tool/bin/python" | grep -v '^free-claude-code' > "$cons" || true
 fi
-uv tool install --force --constraints "$cons" "$repo"
+# Keep the dependency versions FCC already runs with; a release that needs newer ones installs unpinned, as
+# upstream's own installer always does.
+cons=$(mktemp); trap 'rm -f "$cons"' EXIT
+tool=$(uv tool dir)/free-claude-code
+[ -x "$tool/bin/python" ] && uv pip freeze --python "$tool/bin/python" 2>/dev/null | grep -v '^free-claude-code' > "$cons" || true
+uv tool install --force --constraints "$cons" "$repo" || uv tool install --force "$repo"
 printf 'FCC installed from the duo branch (%s). Restart fcc-server to load it.\n' "$(git rev-parse --short HEAD)"
