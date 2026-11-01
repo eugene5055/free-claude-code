@@ -1,11 +1,15 @@
 """Shared Claude Code environment policy for FCC client surfaces."""
 
+import os
 from collections.abc import Mapping
+from pathlib import Path
 
 from free_claude_code.harnesses.environment import client_environment
 
 CLAUDE_CODE_AUTO_COMPACT_WINDOW = "190000"
 CLAUDE_BINARY_NAME = "claude"
+# Claude Code mods FCC ships: the fcc-usage panel (/fcc-usage).
+CLAUDE_MODS = (Path(__file__).resolve().parent / "claude_mods" / "fcc-usage",)
 
 
 def claude_proxy_values(proxy_root_url: str, auth_token: str) -> dict[str, str]:
@@ -33,10 +37,15 @@ def build_claude_proxy_env(
     """Return the canonical environment for Claude Code proxy sessions."""
 
     # Claude's aggregate traffic flag also suppresses gateway model discovery.
+    updates = claude_proxy_values(proxy_root_url, auth_token)
+    existing = [d for d in base_env.get("CLAUDE_CODE_PLUGIN_DIRS", "").split(os.pathsep) if d]
+    mods = [str(d) for d in CLAUDE_MODS if d.is_dir() and str(d) not in existing]
+    if mods:
+        updates["CLAUDE_CODE_PLUGIN_DIRS"] = os.pathsep.join([*existing, *mods])
     return client_environment(
         base_env,
         proxy_root_url=proxy_root_url,
         remove_prefixes=("ANTHROPIC_",),
         remove_keys=("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",),
-        updates=claude_proxy_values(proxy_root_url, auth_token),
+        updates=updates,
     )

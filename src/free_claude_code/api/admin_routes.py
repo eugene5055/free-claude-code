@@ -20,8 +20,10 @@ from free_claude_code.application.connected_accounts import (
     ConnectedAccountLoginMode,
 )
 from free_claude_code.application.errors import ApplicationError
+from free_claude_code.application import model_groups, model_usability
 from free_claude_code.application.model_catalog import read_model_catalog
 from free_claude_code.application.model_metadata import ProviderModelRefreshResult
+from free_claude_code.application.provider_quota import ProviderQuotaService
 from free_claude_code.config.admin.custom_providers import CustomProviderMutation
 from free_claude_code.config.admin.manifest import FIELD_BY_KEY
 from free_claude_code.config.errors import ConfigConflictError
@@ -262,6 +264,49 @@ async def models(
 ):
     require_loopback_admin(request)
     return _model_options(services)
+
+
+@router.get("/admin/api/usage")
+async def admin_usage(
+    request: Request,
+    services: ApiServices = Depends(get_services),
+):
+    require_loopback_admin(request)
+    quota_service = ProviderQuotaService(services.requests.current_settings())
+    groups = await quota_service.get_all_quotas()
+    return {
+        "groups": [
+            {
+                "name": group.name,
+                "display_name": group.display_name,
+                "models": list(group.models),
+                "providers": [
+                    {
+                        "provider_id": p.provider_id,
+                        "display_name": p.display_name,
+                        "group": p.group,
+                        "error": p.error,
+                        "last_checked": p.last_checked,
+                        "windows": [
+                            {
+                                "label": w.label,
+                                "used_pct": w.used_pct,
+                                "remaining_pct": w.remaining_pct,
+                                "resets_at": w.resets_at,
+                                "refreshes_in": w.refreshes_in,
+                                "limit_type": w.limit_type,
+                                "raw_used": w.raw_used,
+                                "raw_limit": w.raw_limit,
+                            }
+                            for w in p.windows
+                        ],
+                    }
+                    for p in group.providers
+                ],
+            }
+            for group in groups.values()
+        ]
+    }
 
 
 @router.get("/admin/api/integrations/claude-onboarding")
@@ -518,11 +563,23 @@ def _model_options(
     failed_provider_ids = (
         refresh_result.failed_provider_ids if refresh_result is not None else ()
     )
+    labels = {model.provider_model_ref: model.display_name for model in catalog.models}
+    refs = list(labels)
+    # Only models that answered and are offered (free, not blocked): model_usability. Nothing checked yet: all.
+    usable = model_usability.usable_refs()
+    if usable is not None:
+        refs = [ref for ref in refs if ref in usable] + sorted(usable - labels.keys())
+    # One entry per model name for pickers that show plain names (Duo's FCC Claude settings); its providers
+    # fastest first, so the first is the one to store when a name is chosen.
+    provider_ids = services.requests.current_settings().provider_ids
+    groups = []
+    for name, members in model_groups.group_by_name(refs).items():
+        ordered = [ref for ref in model_groups.members(name, provider_ids) if ref in members] or members
+        groups.append({"id": name, "name": model_groups.display_name(members), "providers": ordered})
     return {
-        "models": [model.provider_model_ref for model in catalog.models],
-        "model_labels": {
-            model.provider_model_ref: model.display_name for model in catalog.models
-        },
+        "models": refs,
+        "model_labels": {ref: labels.get(ref, ref) for ref in refs},
+        "groups": groups,
         "failed_providers": list(failed_provider_ids),
     }
 

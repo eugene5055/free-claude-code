@@ -6,6 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from free_claude_code.application import model_groups, model_usability
 from free_claude_code.application.model_catalog import (
     ModelCatalog,
     context_window_for_client,
@@ -193,10 +194,20 @@ def build_muse_models_list_response(
 def _build_claude_models_response(
     catalog: ModelCatalog, *, desktop: bool = False
 ) -> ModelsListResponse:
-    """Keep shortcuts first and provider variants together in catalog order."""
+    """Keep shortcuts first and provider variants together in catalog order.
+
+    Provider models that have not answered a request (model_usability) are left out, so Claude Code's
+    model picker only offers models that work. The shortcuts stay: they route to MODEL/MODEL_* and fallbacks.
+    Claude Code (not Desktop) gets one entry per model name across providers (model_groups).
+    """
+    usable = model_usability.usable_refs()
+    if usable is not None and not desktop:
+        return _build_grouped_claude_models_response(catalog, usable)
     models = list(SUPPORTED_CLAUDE_MODELS)
     for model in catalog.models:
         ref = model.provider_model_ref
+        if usable is not None and ref not in usable:
+            continue
         native = supports_native_messages(ref.partition("/")[0])
         if native or model.supports_reasoning is not False:
             models.append(
@@ -217,6 +228,43 @@ def _build_claude_models_response(
                 ),
             )
         )
+    return ModelsListResponse(
+        data=models,
+        first_id=models[0].id if models else None,
+        has_more=False,
+        last_id=models[-1].id if models else None,
+    )
+
+
+def _build_grouped_claude_models_response(
+    catalog: ModelCatalog, usable: set[str]
+) -> ModelsListResponse:
+    """`anthropic/fcc/<name>` per model name; the router picks a working provider for it."""
+    info = {model.provider_model_ref: model for model in catalog.models}
+    # Catalog order first; then usable refs the catalog spells differently (providers normalise some ids).
+    ordered = [ref for ref in info if ref in usable] + sorted(usable - info.keys())
+    models = list(SUPPORTED_CLAUDE_MODELS)
+    for name, refs in model_groups.group_by_name(ordered).items():
+        label = model_groups.display_name(refs)
+        if len(refs) > 1:
+            label = f"{label} ({len(refs)} providers)"
+        natives = [supports_native_messages(ref.partition("/")[0]) for ref in refs]
+        reasoning = any(
+            native or getattr(info.get(ref), "supports_reasoning", None) is not False
+            for ref, native in zip(refs, natives)
+        )
+        group_ref = f"{model_groups.GROUP_PROVIDER}/{name}"
+        if reasoning:
+            models.append(
+                _discovered_model_response(gateway_model_id(group_ref), display_name=label)
+            )
+        if not all(natives):
+            models.append(
+                _discovered_model_response(
+                    no_thinking_gateway_model_id(group_ref),
+                    display_name=f"{label} (no thinking)",
+                )
+            )
     return ModelsListResponse(
         data=models,
         first_id=models[0].id if models else None,

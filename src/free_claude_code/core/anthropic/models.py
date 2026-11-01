@@ -133,9 +133,13 @@ class MessagesRequest(BaseModel):
     tool_choice: dict[str, Any] | None = None
     thinking: ThinkingConfig | None = None
     context_management: dict[str, Any] | None = None
+    # Claude Code fast mode sends speed="fast"; accepted but not forwarded.
+    speed: str | None = Field(default=None, exclude=True)
     output_config: dict[str, Any] | None = None
     mcp_servers: list[dict[str, Any]] | None = None
     extra_body: dict[str, Any] | None = None
+    # Claude Code fast mode sends speed="fast"; accepted but never forwarded.
+    speed: str | None = Field(default=None, exclude=True)
     betas: list[str] | None = Field(default=None, exclude=True)
 
     @field_validator("max_tokens", mode="before")
@@ -158,6 +162,8 @@ class TokenCountRequest(BaseModel):
     thinking: ThinkingConfig | None = None
     tool_choice: dict[str, Any] | None = None
     context_management: dict[str, Any] | None = None
+    # Claude Code fast mode sends speed="fast"; accepted but not forwarded.
+    speed: str | None = Field(default=None, exclude=True)
     output_config: dict[str, Any] | None = None
     mcp_servers: list[dict[str, Any]] | None = None
     betas: list[str] | None = Field(default=None, exclude=True)

@@ -166,6 +166,11 @@ class ApplicationRuntime:
         """Whether this runtime released its complete ownership graph."""
         return self._closed
 
+    @property
+    def database(self) -> SQLiteDatabase | None:
+        """Access the SQLite database for usage tracking and other features."""
+        return self._database
+
     async def start(self) -> None:
         try:
             async with self._lifecycle_lock:

@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FCC Usage</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --panel: #ffffff; --text: #1d1c1a; --muted: #6b6862; --line: #e4e1da;
+    --bar-bg: #ebe8e1; --ok: #3f7d4e; --warn: #b7791f; --hot: #b23b2e; --accent: #c15f3c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1918; --panel: #232220; --text: #ece9e3; --muted: #9c978e; --line: #34322f;
+      --bar-bg: #34322f; --ok: #6fbf80; --warn: #e0a84a; --hot: #ef6f5f; --accent: #e08a63;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  select, button { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line);
+                   border-radius: 6px; padding: 5px 10px; max-width: 100%; }
+  button { cursor: pointer; }
+  button.on { border-color: var(--accent); color: var(--accent); }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
+  h2 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 12px; }
+  .muted { color: var(--muted); }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 18px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; margin-top: 12px; }
+  th, td { text-align: right; padding: 6px 8px; border-top: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; white-space: normal; overflow-wrap: anywhere; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .table-wrap { overflow-x: auto; }
+  .limit { padding: 10px 0; border-top: 1px solid var(--line); }
+  .limit:first-of-type { border-top: 0; }
+  .limit-head { display: flex; justify-content: space-between; gap: 12px; }
+  .bar { height: 10px; background: var(--bar-bg); border-radius: 5px; overflow: hidden; margin: 6px 0 4px; }
+  .fill { height: 100%; border-radius: 5px; background: var(--ok); }
+  .fill.warn { background: var(--warn); } .fill.hot { background: var(--hot); }
+  .stat { font-size: 22px; font-weight: 600; }
+  .driver { margin: 12px 0; }
+  .driver p { margin: 2px 0 0; color: var(--muted); font-size: 14px; }
+  #status { min-height: 1.5em; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>FCC Usage</h1>
+    <div class="controls">
+      <select id="session" aria-label="Claude session"></select>
+      <button id="day" class="on" type="button">24h</button>
+      <button id="week" type="button">7 days</button>
+      <button id="refresh" type="button">Refresh</button>
+    </div>
+  </header>
+  <p id="status" class="muted" role="status"></p>
+
+  <section>
+    <h2>Session</h2>
+    <div id="sessionBody" class="muted">Loading…</div>
+  </section>
+
+  <section>
+    <h2>Provider limits</h2>
+    <p class="muted" style="margin-top:0">Quota APIs plus the rate-limit headers each provider sends back with its responses.</p>
+    <div id="limitsBody"></div>
+  </section>
+
+  <section>
+    <h2>What's contributing to your fcc usage?</h2>
+    <div id="contribBody"></div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let period = "day";
+let chosenSession = "";
+
+function esc(text) {
+  return String(text ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function count(n) {
+  n = n || 0;
+  for (const [size, suffix] of [[1e9, "b"], [1e6, "m"], [1e3, "k"]]) if (n >= size) return (n / size).toFixed(1) + suffix;
+  return String(Math.round(n));
+}
+function duration(ms) {
+  const s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  if (h) return `${h}h ${m}m ${r}s`;
+  if (m) return `${m}m ${r}s`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+function ago(seconds) {
+  if (seconds == null) return "never";
+  const s = Math.max(0, Math.floor(seconds));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+function resets(epoch) {
+  const when = new Date(epoch * 1000), now = new Date();
+  const clock = when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).replace(" ", "").toLowerCase();
+  const day = when.toDateString() === now.toDateString() ? "" : when.toLocaleDateString([], { month: "short", day: "numeric" }) + ", ";
+  return `Resets ${day}${clock}`;
+}
+
+function renderSessions(data) {
+  const select = $("session");
+  const current = data.session?.id || "";
+  select.innerHTML = (data.sessions || []).map((s) => {
+    const label = `${s.session_id.slice(0, 8)} · ${s.requests} req · ${new Date(s.last * 1000).toLocaleString()}`;
+    return `<option value="${esc(s.session_id)}"${s.session_id === current ? " selected" : ""}>${esc(label)}</option>`;
+  }).join("") || `<option value="">No sessions yet</option>`;
+}
+
+function renderSession(s) {
+  if (!s) {
+    $("sessionBody").innerHTML = `<p class="muted">No fcc requests with a Claude session id have been recorded yet.</p>`;
+    return;
+  }
+  const note = s.unknown_pricing ? ` <span class="muted">(costs may be inaccurate due to usage of unknown models)</span>` : "";
+  const c = s.cache;
+  const misses = c.misses ? `${c.misses} miss${c.misses === 1 ? "" : "es"} (last ${ago(c.last_miss_ago)})` : "no misses";
+  $("sessionBody").innerHTML = `
+    <dl class="kv">
+      <dt>Session id</dt><dd>${esc(s.id)}</dd>
+      <dt>Total cost</dt><dd>$${s.cost.toFixed(2)}${note}</dd>
+      <dt>Total duration (API)</dt><dd>${duration(s.api_ms)}</dd>
+      <dt>Total duration (wall)</dt><dd>${duration(s.wall_ms)}</dd>
+      <dt>Requests</dt><dd>${s.requests}${s.failed ? ` (${s.failed} failed)` : ""}</dd>
+      <dt>Prompt cache</dt><dd>${c.cached_pct.toFixed(0)}% of input tokens from cache · ${misses} · last activity ${ago(c.last_activity_ago)}</dd>
+    </dl>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Model</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th>Cost</th></tr></thead>
+      <tbody>${s.by_model.map((m) => `<tr><td>${esc(m.model)}</td><td>${count(m.input)}</td><td>${count(m.output)}</td>
+        <td>${count(m.cache_read)}</td><td>${count(m.cache_write)}</td><td>$${m.cost.toFixed(2)}</td></tr>`).join("")}</tbody>
+    </table></div>`;
+}
+
+function renderLimits(limits) {
+  const withData = limits.filter((p) => p.windows.length);
+  const without = limits.filter((p) => !p.windows.length).map((p) => p.display_name);
+  let html = withData.flatMap((p) => p.windows.map((w) => {
+    const level = w.used_pct >= 90 ? "hot" : w.used_pct >= 70 ? "warn" : "";
+    const details = [w.detail, w.resets_at ? resets(w.resets_at) : null].filter(Boolean).join(" · ");
+    return `<div class="limit">
+      <div class="limit-head"><strong>${esc(p.display_name)} · ${esc(w.label)}</strong><span>${w.used_pct.toFixed(0)}% used</span></div>
+      <div class="bar" role="img" aria-label="${w.used_pct.toFixed(0)}% used"><div class="fill ${level}" style="width:${w.used_pct.toFixed(1)}%"></div></div>
+      <div class="muted">${esc(details)}</div>
+    </div>`;
+  })).join("");
+  if (without.length) {
+    html += `<p class="muted">No limit data yet: ${esc(without.join(", "))}. These have no quota API and haven't sent rate-limit headers yet; bars appear after their next request.</p>`;
+  }
+  $("limitsBody").innerHTML = html || `<p class="muted">No providers configured.</p>`;
+}
+
+function renderContributing(c) {
+  if (!c) { $("contribBody").innerHTML = `<p class="muted">Usage storage is unavailable.</p>`; return; }
+  const providers = c.by_provider.slice(0, 6).map((p) => `${esc(p.provider_id)} ${p.pct.toFixed(0)}%`).join(" · ");
+  $("contribBody").innerHTML = `
+    <p class="muted" style="margin-top:0">${esc(c.label)} · ${c.requests} requests · ${count(c.tokens)} tokens · every client using this fcc server.
+      These are independent characteristics of your usage, not a breakdown.</p>
+    ${c.tokens ? `
+    <div class="driver"><span class="stat">${c.large_context_pct.toFixed(0)}%</span> of your usage was at &gt;150k context
+      <p>Longer sessions are more expensive even when cached. /compact mid-task, /clear when switching to new tasks.</p></div>
+    <div class="driver"><span class="stat">${c.cache_miss_pct.toFixed(0)}%</span> of your usage hit a &gt;100k-token cache miss
+      <p>Uncached input is expensive, and often happens when sending a message to a session that has gone idle. /compact before stepping away keeps the cold-start small.</p></div>
+    <p class="muted">By provider: ${providers}</p>` : `<p class="muted">No requests in this period.</p>`}`;
+}
+
+async function load(refresh = false) {
+  $("status").textContent = "Loading…";
+  const params = new URLSearchParams({ period });
+  if (chosenSession) params.set("session", chosenSession);
+  if (refresh) params.set("refresh", "1");
+  try {
+    const resp = await fetch(`/api/usage/report?${params}`, { cache: "no-store" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    renderSessions(data);
+    renderSession(data.session);
+    renderLimits(data.limits || []);
+    renderContributing(data.contributing);
+    $("status").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+  } catch (error) {
+    $("status").textContent = `Could not load usage: ${error.message}`;
+  }
+}
+
+$("session").addEventListener("change", (e) => { chosenSession = e.target.value; load(); });
+for (const id of ["day", "week"]) {
+  $(id).addEventListener("click", () => {
+    period = id;
+    $("day").classList.toggle("on", id === "day");
+    $("week").classList.toggle("on", id === "week");
+    load();
+  });
+}
+$("refresh").addEventListener("click", () => load(true));
+load();
+setInterval(() => load(), 30000);
+</script>
+</body>
+</html>

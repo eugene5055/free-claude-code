@@ -39,6 +39,10 @@ _MESSAGING_COLUMNS = {
     "messaging_managed_messages": "sequence platform chat_id message_id ts direction kind",
     "messaging_legacy_import": "source outcome trees messages skipped cleanup_pending",
 }
+_USAGE_COLUMNS = {
+    "request_usage": "request_id session_id provider_id model wire_api input_tokens output_tokens "
+    "cache_read_tokens cache_write_tokens cost_usd duration_ms status_code error_type created_at",
+}
 
 
 def _connect(
@@ -72,7 +76,14 @@ def _schema_version(connection: sqlite3.Connection) -> int:
     }
     if version == 0 and not tables:
         return version
-    columns = _BASE_COLUMNS | (_MESSAGING_COLUMNS if version >= 4 else {})
+    columns = (
+        _BASE_COLUMNS
+        | (_MESSAGING_COLUMNS if version >= 4 else {})
+        | (_USAGE_COLUMNS if version >= 6 else {})
+    )
+    if version < 6:
+        # The usage table (migration 6) may already exist in an older file: migration 6 creates it only if missing.
+        tables -= _USAGE_COLUMNS.keys()
     if tables != columns.keys():
         raise sqlite3.DatabaseError(
             "Unrecognized FCC database schema. Saved data was preserved."

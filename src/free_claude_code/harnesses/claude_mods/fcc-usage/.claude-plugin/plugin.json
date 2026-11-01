@@ -1,0 +1,1 @@
+{ "name": "fcc-usage", "version": "0.1.0", "description": "fcc Usage panel: session cost and tokens, provider limit bars, what drives usage", "types": "./types/index.d.ts" }

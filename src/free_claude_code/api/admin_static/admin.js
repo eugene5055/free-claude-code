@@ -42,6 +42,13 @@ const VIEW_GROUPS = [
     containerId: "modelConfigSections",
   },
   {
+    id: "usage",
+    label: "Usage",
+    title: "Usage",
+    sections: [],
+    containerId: "usageGroups",
+  },
+  {
     id: "messaging",
     label: "Messaging",
     title: "Messaging",
@@ -147,6 +154,174 @@ function renderStartup() {
   renderCodexIntegration();
   renderClaudeDesktopIntegration();
   renderDshDesktopIntegration();
+}
+
+function formatRefreshTime(seconds) {
+  if (seconds == null || !isFinite(seconds)) return "Unknown";
+  if (seconds <= 0) return "Resetting…";
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (hours > 0) return `Refreshes in ${hours}h ${minutes}m`;
+  return `Refreshes in ${minutes}m`;
+}
+
+function renderUsage(data) {
+  const container = byId("usageGroups");
+  const message = byId("usageMessage");
+  container.replaceChildren();
+  message.hidden = true;
+  message.textContent = "";
+
+  if (!data?.groups?.length) {
+    message.textContent = "No quota data available. Configure providers to see their limits.";
+    message.className = "message-area warn";
+    message.hidden = false;
+    return;
+  }
+
+  data.groups.forEach((group) => {
+    const groupEl = document.createElement("section");
+    groupEl.className = "quota-group";
+    groupEl.dataset.quotaGroup = group.name;
+
+    const heading = document.createElement("h3");
+    heading.textContent = group.display_name || group.name;
+    groupEl.appendChild(heading);
+
+    if (group.models?.length) {
+      const modelsList = document.createElement("p");
+      modelsList.className = "quota-models-list";
+      modelsList.textContent = group.models.join(", ");
+      groupEl.appendChild(modelsList);
+    }
+
+    const providersGrid = document.createElement("div");
+    providersGrid.className = "quota-providers-grid";
+
+    group.providers.forEach((provider) => {
+      const providerEl = document.createElement("article");
+      providerEl.className = "quota-provider";
+
+      const providerHeader = document.createElement("div");
+      providerHeader.className = "quota-provider-header";
+
+      const providerName = document.createElement("strong");
+      providerName.textContent = provider.display_name || provider.provider_id;
+      providerHeader.appendChild(providerName);
+
+      if (provider.error) {
+        const errorBadge = document.createElement("span");
+        errorBadge.className = "field-source";
+        errorBadge.textContent = "Error";
+        providerHeader.appendChild(errorBadge);
+      }
+
+      providerEl.appendChild(providerHeader);
+
+      if (provider.last_checked) {
+        const lastChecked = document.createElement("div");
+        lastChecked.className = "quota-last-checked";
+        const date = new Date(provider.last_checked);
+        lastChecked.textContent = `Last checked: ${date.toLocaleString()}`;
+        providerEl.appendChild(lastChecked);
+      }
+
+      if (provider.windows?.length) {
+        provider.windows.forEach((window) => {
+          const windowEl = document.createElement("div");
+          windowEl.className = "quota-window";
+
+          const windowHeader = document.createElement("div");
+          windowHeader.className = "quota-window-header";
+
+          const windowLabel = document.createElement("span");
+          windowLabel.className = "quota-window-label";
+          windowLabel.textContent = window.label || window.limit_type || "Quota";
+          windowHeader.appendChild(windowLabel);
+
+          const windowPct = document.createElement("span");
+          windowPct.className = "quota-window-pct";
+          const usedPct = Math.round(window.used_pct ?? 0);
+          windowPct.textContent = `${usedPct}% used`;
+          windowHeader.appendChild(windowPct);
+
+          windowEl.appendChild(windowHeader);
+
+          const progressBar = document.createElement("div");
+          progressBar.className = "progress-bar";
+
+          const progressFill = document.createElement("div");
+          progressFill.className = "progress-fill";
+          progressFill.style.width = `${Math.min(100, Math.max(0, usedPct))}%`;
+          if (usedPct >= 90) progressFill.classList.add("error");
+          else if (usedPct >= 75) progressFill.classList.add("warn");
+          else progressFill.classList.add("ok");
+          progressBar.appendChild(progressFill);
+
+          windowEl.appendChild(progressBar);
+
+          const windowDetails = document.createElement("div");
+          windowDetails.className = "quota-window-details";
+
+          const refreshInfo = document.createElement("span");
+          if (window.refreshes_in != null) {
+            refreshInfo.textContent = formatRefreshTime(window.refreshes_in);
+          } else if (window.resets_at) {
+            const resetDate = new Date(window.resets_at);
+            refreshInfo.textContent = `Resets ${resetDate.toLocaleString()}`;
+          }
+          windowDetails.appendChild(refreshInfo);
+
+          if (window.raw_used != null && window.raw_limit != null) {
+            const rawInfo = document.createElement("span");
+            rawInfo.textContent = `${window.raw_used} / ${window.raw_limit} ${window.limit_type || ""}`.trim();
+            windowDetails.appendChild(rawInfo);
+          }
+
+          windowEl.appendChild(windowDetails);
+          providerEl.appendChild(windowEl);
+        });
+      } else {
+        const noData = document.createElement("p");
+        noData.className = "quota-empty";
+        noData.textContent = "No quota windows reported";
+        providerEl.appendChild(noData);
+      }
+
+      providersGrid.appendChild(providerEl);
+    });
+
+    groupEl.appendChild(providersGrid);
+    container.appendChild(groupEl);
+  });
+}
+
+async function refreshUsage() {
+  const button = byId("refreshUsage");
+  const message = byId("usageMessage");
+  const original = button.textContent;
+  button.textContent = "Refreshing…";
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  message.hidden = true;
+
+  try {
+    const data = await api("/admin/api/usage");
+    renderUsage(data);
+    if (data?.groups?.length) {
+      message.textContent = "Quota data refreshed";
+      message.className = "message-area ok";
+      message.hidden = false;
+    }
+  } catch (error) {
+    message.textContent = `Failed to refresh: ${error.message}`;
+    message.className = "message-area error";
+    message.hidden = false;
+  } finally {
+    button.textContent = original;
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+  }
 }
 
 async function refreshStartup() {
@@ -2627,6 +2802,8 @@ dshDesktopIntegrationDialog.addEventListener("click", (event) => {
     dshDesktopIntegrationDialog.close();
   }
 });
+
+byId("refreshUsage").addEventListener("click", () => refreshUsage());
 
 // Keep footer clearance exact when messages wrap or a view hides the bar.
 new ResizeObserver(([entry]) => {

@@ -39,6 +39,7 @@ from .request_ids import (
 from .request_lifetime import ClientRequestLifetimeMiddleware
 from .request_outcomes import RequestOutcomeMiddleware
 from .routes import router
+from .usage_tracking import UsageTrackingMiddleware
 from .validation_log import summarize_request_validation_body
 
 
@@ -46,6 +47,17 @@ def create_app(services: ApiServices) -> FastAPI:
     """Create the HTTP adapter around explicitly supplied runtime services."""
     app = FastAPI(title="Claude Code Proxy", version=package_version())
     app.state.services = services
+
+    # Upstream rate-limit headers feed the provider limit bars on /usage.
+    from free_claude_code.application import rate_limit_headers
+
+    rate_limit_headers.install()
+
+    # Add usage tracking middleware (needs database)
+    database = getattr(services.admin, "database", None)
+    if database is not None:
+        app.add_middleware(UsageTrackingMiddleware, database=database)
+
     app.add_middleware(AdminNoStoreMiddleware)
     app.add_middleware(ClientRequestLifetimeMiddleware)
     app.add_middleware(RequestOutcomeMiddleware)
@@ -54,6 +66,20 @@ def create_app(services: ApiServices) -> FastAPI:
     app.include_router(admin_router)
     app.include_router(code_router)
     app.include_router(router)
+
+    # Duo's council (api/council_api.py, a local addition): its authenticated fixed-route endpoints on this ordinary
+    # server, so the council and ordinary clients share one FCC owner and port. A council-only service took both
+    # and every ordinary fcc-claude job then failed its /health check.
+    try:
+        from fastapi import APIRouter as _CouncilRouter
+        from .council_api import register as _register_council
+        from .council_routes import _create_messages_response as _council_response
+    except ImportError:
+        pass
+    else:
+        _council = _CouncilRouter()
+        _register_council(_council, _council_response)
+        app.include_router(_council)
 
     @app.exception_handler(CodeError)
     async def code_error_handler(request: Request, exc: CodeError):

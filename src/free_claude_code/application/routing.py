@@ -32,6 +32,13 @@ from free_claude_code.core.openai_responses import OpenAIResponsesRequest
 from free_claude_code.core.reasoning import ReasoningPolicy
 from free_claude_code.core.trace import trace_event
 
+from free_claude_code.application.provider_ratings import (
+    best,
+    _kind_for_model,
+    _configured_providers,
+)
+
+from . import model_groups, model_usability
 from .reasoning import resolve_reasoning_policy, resolve_responses_reasoning_policy
 
 _ROUTE_SETTINGS = (
@@ -68,6 +75,8 @@ class ResolvedModelRoute:
     primary: ProviderModelTarget
     fallbacks: tuple[ProviderModelCandidate, ...]
     reasoning_preference: ReasoningPreference
+    # A model_groups name: fallbacks are its other providers only, never another model.
+    same_model_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +117,9 @@ class ModelRouter:
         self._settings = settings
 
     def resolve(self, claude_model_name: str) -> ResolvedModelRoute:
+        grouped = self._group_route(claude_model_name)
+        if grouped is not None:
+            return grouped
         (
             direct_provider_id,
             direct_provider_model,
@@ -136,17 +148,25 @@ class ModelRouter:
 
         provider_model_ref = self._resolve_model_ref(claude_model_name)
         reasoning_preference = self._resolve_reasoning_preference(claude_model_name)
-        primary = self._target_from_ref(provider_model_ref)
+        configured = self._target_from_ref(provider_model_ref)
+        # A configured model (MODEL, MODEL_*) runs on the fastest provider serving it (model_groups).
+        fastest = model_groups.members(
+            model_groups.canonical_name(provider_model_ref), self._settings.provider_ids
+        )
+        primary = self._target_from_ref(fastest[0]) if fastest else configured
         if primary.provider_model != claude_model_name:
             logger.debug(
                 "MODEL MAPPING: '{}' -> '{}'",
                 claude_model_name,
-                primary.provider_model,
+                primary.provider_model_ref,
             )
+        fallbacks = self._fallback_targets(primary)
+        if primary != configured and all(c.target != configured for c in fallbacks):
+            fallbacks = (ProviderModelCandidate(configured), *fallbacks)
         return ResolvedModelRoute(
             original_model=claude_model_name,
             primary=primary,
-            fallbacks=self._fallback_targets(primary),
+            fallbacks=fallbacks,
             reasoning_preference=reasoning_preference,
         )
 
@@ -170,19 +190,60 @@ class ModelRouter:
             api_key_number=api_key_number,
         )
 
+    def _group_route(self, model_name: str) -> ResolvedModelRoute | None:
+        """`anthropic/fcc/<name>`: the model <name> on whichever provider serves it (model_groups)."""
+        decoded = decode_gateway_model_id(model_name) if "/" in model_name else None
+        if decoded is None or decoded.provider_id != model_groups.GROUP_PROVIDER:
+            return None
+        name = model_groups.canonical_name(decoded.provider_model)
+        refs = model_groups.members(name, self._settings.provider_ids)
+        if not refs:
+            raise InvalidRequestError(
+                f"No provider currently serves model {decoded.provider_model!r}; pick another model."
+            )
+        targets = [self._target_from_ref(ref) for ref in refs]
+        logger.debug("MODEL GROUP: '{}' -> {}", model_name, refs)
+        return ResolvedModelRoute(
+            original_model=model_name,
+            primary=targets[0],
+            # Only the same model on other providers, never a configured fallback model.
+            fallbacks=tuple(ProviderModelCandidate(t) for t in targets[1:]),
+            reasoning_preference=(
+                ReasoningPreference.OFF
+                if decoded.force_reasoning_off
+                else self._settings.reasoning_policy
+            ),
+            same_model_only=True,
+        )
+
     def _fallback_targets(
         self, primary: ProviderModelTarget
     ) -> tuple[ProviderModelCandidate, ...]:
-        configured = tuple(
+        # The same model on other providers first (model_groups), then the configured fallbacks.
+        siblings = tuple(
+            ProviderModelCandidate(self._target_from_ref(ref))
+            for ref in model_groups.members(
+                model_groups.canonical_name(primary.provider_model_ref),
+                self._settings.provider_ids,
+            )
+            if ref != primary.provider_model_ref
+        )
+        # Paid and blocked fallbacks are skipped (model_usability.offered).
+        configured = siblings + tuple(
             ProviderModelCandidate(
                 self._target_from_ref(entry.model, entry.api_key_number),
                 entry.reasoning,
             )
             for entry in self._settings.model_fallbacks or ()
+            if model_usability.offered(entry.model)
         )
-        return tuple(
-            candidate for candidate in configured if candidate.target != primary
-        )
+        seen = {primary}
+        unique = []
+        for candidate in configured:
+            if candidate.target not in seen:
+                seen.add(candidate.target)
+                unique.append(candidate)
+        return tuple(unique)
 
     def _validate_provider_id(self, provider_id: str) -> None:
         if provider_id not in self._settings.provider_ids:
@@ -254,7 +315,28 @@ class ModelRouter:
             model = getattr(self._settings, route[1])
             if isinstance(model, str):
                 return model
+
+        dynamic = self._dynamic_model_ref(claude_model_name)
+        if dynamic is not None:
+            return dynamic
         return self._settings.model
+
+    def _dynamic_model_ref(self, claude_model_name: str) -> str | None:
+        """Resolve to the best available provider dynamically, or None when unrated.
+
+        Only a free model already seen working is used (model_usability), since MODEL's model may not exist on the
+        best-rated provider.
+        """
+        kind = _kind_for_model(claude_model_name)
+        candidates = _configured_providers(self._settings)
+        best_provider = best(kind, candidates)
+        if best_provider is None:
+            return None
+        _, _, model_name = self._settings.model.partition("/")
+        ref = f"{best_provider}/{model_name}"
+        if ref not in (model_usability.usable_refs() or set()):
+            return None
+        return ref
 
     def _resolve_reasoning_preference(
         self, claude_model_name: str

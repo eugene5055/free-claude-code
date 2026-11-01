@@ -8,6 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from loguru import logger
 from pydantic import ValidationError
 
+from free_claude_code.application.provider_quota import ProviderQuotaService
 from free_claude_code.application.errors import ApplicationError, InvalidRequestError
 from free_claude_code.application.ports import ProviderResolver, RequestRuntimeLease
 from free_claude_code.application.routing import ModelRouter, supports_native_messages
@@ -27,6 +28,7 @@ from free_claude_code.core.anthropic.passthrough import NativeMessagesRequest
 from free_claude_code.core.json_types import JsonObject
 from free_claude_code.core.openai_responses import OpenAIResponsesRequest
 from free_claude_code.core.trace import trace_event
+from free_claude_code.application.usage_report import UsageDatabase
 
 from .dependencies import (
     get_services,
@@ -289,6 +291,233 @@ async def probe_health():
     return _probe_response("GET, HEAD, OPTIONS")
 
 
+@router.get("/api/usage")
+async def usage_api(
+    services: ApiServices = Depends(get_services),
+):
+    """Get quota data for all configured providers (public endpoint)."""
+    quota_service = ProviderQuotaService(services.requests.current_settings())
+    groups = await quota_service.get_all_quotas()
+    return {
+        "groups": [
+            {
+                "name": group.name,
+                "display_name": group.display_name,
+                "models": list(group.models),
+                "providers": [
+                    {
+                        "provider_id": p.provider_id,
+                        "display_name": p.display_name,
+                        "group": p.group,
+                        "error": p.error,
+                        "last_checked": p.last_checked,
+                        "windows": [
+                            {
+                                "label": w.label,
+                                "used_pct": w.used_pct,
+                                "remaining_pct": w.remaining_pct,
+                                "resets_at": w.resets_at,
+                                "refreshes_in": w.refreshes_in,
+                                "limit_type": w.limit_type,
+                                "raw_used": w.raw_used,
+                                "raw_limit": w.raw_limit,
+                            }
+                            for w in p.windows
+                        ],
+                    }
+                    for p in group.providers
+                ],
+            }
+            for group in groups.values()
+        ]
+    }
+
+
+async def _usage_report(request: Request, services: ApiServices) -> dict:
+    from free_claude_code.application.usage_report import build_report
+
+    from .admin_security import require_loopback_admin
+
+    require_loopback_admin(request)
+    params = request.query_params
+    return await build_report(
+        getattr(services.admin, "database", None),
+        services.requests.current_settings(),
+        session_id=params.get("session") or None,
+        period=params.get("period") or "day",
+        refresh=params.get("refresh") == "1",
+    )
+
+
+@router.get("/api/usage/report")
+async def usage_report_api(
+    request: Request,
+    services: ApiServices = Depends(get_services),
+):
+    """Session totals, provider limits, and usage drivers (loopback only)."""
+    return await _usage_report(request, services)
+
+
+@router.get("/api/usage/text")
+async def usage_report_text(
+    request: Request,
+    services: ApiServices = Depends(get_services),
+):
+    """The same report as plain text, for the /fcc-usage Claude Code command."""
+    from fastapi.responses import PlainTextResponse
+
+    from free_claude_code.application.usage_report import render_text
+
+    return PlainTextResponse(render_text(await _usage_report(request, services)))
+
+
+@router.get("/api/usage/session")
+async def session_usage_api(
+    services: ApiServices = Depends(get_services),
+):
+    """Get session usage analytics (cost, tokens, duration, cache stats)."""
+    database: UsageDatabase | None = getattr(services.admin, "database", None)
+    if database is None:
+        return {
+            "total_cost": 0.0,
+            "total_duration_api_ms": 0,
+            "total_duration_wall_ms": 0,
+            "total_requests": 0,
+            "by_model": [],
+            "cache_stats": {
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "cache_savings_pct": 0.0,
+            },
+            "by_provider": [],
+        }
+
+    def operation(conn):
+        # Get all usage data
+        rows = conn.execute(
+            """
+            SELECT
+                provider_id,
+                model,
+                wire_api,
+                SUM(input_tokens) as total_input,
+                SUM(output_tokens) as total_output,
+                SUM(cache_read_tokens) as total_cache_read,
+                SUM(cache_write_tokens) as total_cache_write,
+                SUM(cost_usd) as total_cost,
+                SUM(duration_ms) as total_duration,
+                COUNT(*) as request_count,
+                MAX(created_at) as last_request
+            FROM request_usage
+            GROUP BY provider_id, model, wire_api
+            ORDER BY total_cost DESC
+            """
+        ).fetchall()
+
+        # Overall totals
+        totals = conn.execute(
+            """
+            SELECT
+                SUM(cost_usd) as total_cost,
+                SUM(duration_ms) as total_duration,
+                SUM(input_tokens + output_tokens) as total_tokens,
+                SUM(cache_read_tokens) as total_cache_read,
+                SUM(cache_write_tokens) as total_cache_write,
+                COUNT(*) as total_requests,
+                MIN(created_at) as first_request,
+                MAX(created_at) as last_request
+            FROM request_usage
+            """
+        ).fetchone()
+
+        return rows, totals
+
+    rows, totals = await database.run(operation, write=False)
+
+    by_model = []
+    by_provider = {}
+
+    for row in rows:
+        provider_id = row["provider_id"]
+        model = row["model"]
+        wire_api = row["wire_api"]
+        total_input = row["total_input"] or 0
+        total_output = row["total_output"] or 0
+        total_cache_read = row["total_cache_read"] or 0
+        total_cache_write = row["total_cache_write"] or 0
+        total_cost = row["total_cost"] or 0.0
+        total_duration = row["total_duration"] or 0.0
+        request_count = row["request_count"] or 0
+
+        by_model.append({
+            "provider_id": provider_id,
+            "model": model,
+            "wire_api": wire_api,
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+            "cache_read_tokens": total_cache_read,
+            "cache_write_tokens": total_cache_write,
+            "total_tokens": total_input + total_output + total_cache_read + total_cache_write,
+            "cost_usd": round(total_cost, 6),
+            "duration_ms": round(total_duration, 2),
+            "request_count": request_count,
+        })
+
+        if provider_id not in by_provider:
+            by_provider[provider_id] = {
+                "provider_id": provider_id,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "cost_usd": 0.0,
+                "duration_ms": 0.0,
+                "request_count": 0,
+            }
+        p = by_provider[provider_id]
+        p["input_tokens"] += total_input
+        p["output_tokens"] += total_output
+        p["cache_read_tokens"] += total_cache_read
+        p["cache_write_tokens"] += total_cache_write
+        p["cost_usd"] += total_cost
+        p["duration_ms"] += total_duration
+        p["request_count"] += request_count
+
+    # Calculate cache stats
+    total_cache_read = totals["total_cache_read"] or 0
+    total_cache_write = totals["total_cache_write"] or 0
+    total_input_all = sum(m["input_tokens"] for m in by_model)
+    total_tokens_all = sum(m["total_tokens"] for m in by_model)
+
+    cache_savings_pct = 0.0
+    if total_input_all > 0:
+        cache_savings_pct = round((total_cache_read / total_input_all) * 100, 1)
+
+    total_cost = totals["total_cost"] or 0.0
+    total_duration = totals["total_duration"] or 0.0
+    total_requests = totals["total_requests"] or 0
+
+    # Wall time estimate (time between first and last request)
+    wall_duration = 0
+    if totals["first_request"] and totals["last_request"]:
+        wall_duration = (totals["last_request"] - totals["first_request"]) * 1000
+
+    return {
+        "total_cost": round(total_cost, 4),
+        "total_duration_api_ms": round(total_duration, 2),
+        "total_duration_wall_ms": wall_duration,
+        "total_requests": total_requests,
+        "total_tokens": total_tokens_all,
+        "by_model": by_model,
+        "cache_stats": {
+            "cache_read_tokens": total_cache_read,
+            "cache_write_tokens": total_cache_write,
+            "cache_savings_pct": cache_savings_pct,
+        },
+        "by_provider": list(by_provider.values()),
+    }
+
+
 @router.get(
     "/v1/models",
     response_model=ModelsListResponse,
@@ -308,6 +537,20 @@ async def list_models(
         snapshot,
         view=view or x_fcc_model_view or ModelCatalogView.CLAUDE,
     )
+
+
+@router.get("/usage")
+async def usage_page(request: Request):
+    """Serve the usage page (session, provider limits, what's contributing)."""
+    from pathlib import Path
+
+    from fastapi.responses import HTMLResponse
+
+    from .admin_security import require_loopback_admin
+
+    require_loopback_admin(request)
+    page = Path(__file__).resolve().parent / "static" / "usage.html"
+    return HTMLResponse(page.read_text(encoding="utf-8"))
 
 
 @router.get(

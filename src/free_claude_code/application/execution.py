@@ -3,6 +3,7 @@
 import asyncio
 import math
 import sys
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from time import monotonic
 from types import MappingProxyType
@@ -22,6 +23,8 @@ from free_claude_code.core.openai_responses import (
     estimate_responses_input_tokens,
 )
 from free_claude_code.core.reasoning import ReasoningPolicy
+from free_claude_code.application import model_usability, provider_health
+from free_claude_code.application.provider_ratings import record_outcome, _kind_for_model
 from free_claude_code.core.request_outcomes import record_request_route
 from free_claude_code.core.stream_delivery import current_stream_delivery
 from free_claude_code.core.stream_recovery import (
@@ -232,6 +235,7 @@ class ProviderExecutor:
             ingress_count=len(messages),
             request_id=request_id,
             open_candidate=open_candidate,
+            auto_fallbacks=False,
         )
 
     def stream_messages(
@@ -383,11 +387,19 @@ class ProviderExecutor:
         ingress_count: int,
         request_id: str,
         open_candidate: CandidateStreamOpener,
+        auto_fallbacks: bool = True,
     ) -> AsyncIterator[str]:
         """Start and consume candidates through one protocol-blind lifecycle."""
 
         primary = resolved.primary
-        candidates = (ProviderModelCandidate(primary), *resolved.fallbacks)
+        # (open index, candidate): the index tells open_candidate whether it is the primary (0) or a fallback, so it
+        # stays with the candidate when rate-limited providers move to the end (provider_health). A grouped model
+        # name only ever switches providers of the same model, so it gets no automatic fallbacks.
+        candidates, automatic, spare = _ordered_candidates(
+            (ProviderModelCandidate(primary), *resolved.fallbacks),
+            auto_fallbacks=auto_fallbacks and not resolved.same_model_only,
+            request_id=request_id,
+        )
         gateway_model = resolved.original_model
         route_trace: dict[str, object] = {
             "stage": "routing",
@@ -433,13 +445,16 @@ class ProviderExecutor:
             )
 
         async def provider_body() -> AsyncIterator[str]:
+            nonlocal spare
             loop = asyncio.get_running_loop()
             progress_deadline = loop.time() + self._progress_timeout_seconds
             delivery = current_stream_delivery()
             continuation: ContinuationSeed | None = None
-            for index, candidate in enumerate(candidates):
+            configured_failure: ExecutionFailure | None = None
+            for position, (index, candidate) in enumerate(candidates):
                 target = candidate.target
                 record_request_route(target.provider_id, target.provider_model)
+                candidate_started = monotonic()
                 provider_stream: AsyncIterator[str] | None = None
                 candidate_committed = False
                 candidate_failure: ExecutionFailure | None = None
@@ -451,6 +466,17 @@ class ProviderExecutor:
                         )
                     except ExecutionFailure as failure:
                         candidate_failure = failure
+                    except Exception as error:
+                        # An automatic fallback (a model that worked before) whose provider is no longer configured
+                        # or cannot start is skipped like a failed candidate, never failing the request.
+                        if candidate.target.provider_model_ref not in automatic:
+                            raise
+                        candidate_failure = ExecutionFailure(
+                            kind=FailureKind.UNAVAILABLE,
+                            status_code=503,
+                            message=f"Automatic fallback unavailable: {type(error).__name__}",
+                            retryable=True,
+                        )
                     finally:
                         # Initialization has its own request budget. Upstream progress
                         # time is not spent waiting for a provider's startup task.
@@ -496,12 +522,15 @@ class ProviderExecutor:
                             continue
                         if not candidate_committed:
                             candidate_committed = True
-                            if index > 0:
+                            model_usability.record_latency(
+                                target.provider_model_ref, monotonic() - candidate_started
+                            )
+                            if position > 0:
                                 self._trace_fallback_selected(
                                     request_id=request_id,
                                     wire_api=wire_api,
                                     selected=target,
-                                    candidate_index=index + 1,
+                                    candidate_index=position + 1,
                                     candidate_count=len(candidates),
                                 )
                         yield chunk
@@ -530,7 +559,30 @@ class ProviderExecutor:
                             ) from exc
 
                 if candidate_failure is None:
+                    record_outcome(
+                        target.provider_id, _kind_for_model(target.provider_model), True,
+                        monotonic() - candidate_started,
+                    )
+                    model_usability.record_success(target.provider_model_ref)
+                    provider_health.record_success(target.provider_id, target.provider_model)
                     return
+                record_outcome(
+                    target.provider_id, _kind_for_model(target.provider_model), False,
+                    monotonic() - candidate_started,
+                )
+                model_usability.record_failure(target.provider_model_ref, candidate_failure)
+                if (
+                    candidate_failure.kind is FailureKind.RATE_LIMIT
+                    or candidate_failure.status_code == 429
+                ):
+                    provider_health.mark_limited(target.provider_id)
+                    # A rate limit: switch to models of other providers that worked recently (provider_health), tried
+                    # before any candidate whose provider is limited. Only here, so other failures behave as before.
+                    if spare:
+                        _insert_spare(candidates, position, spare, automatic)
+                        spare = []
+                if target.provider_model_ref not in automatic:
+                    configured_failure = candidate_failure
                 recovery_action = "continue" if continuation is not None else "restart"
                 recovery_reason = "no_candidate_output"
                 context = candidate_failure.stream_context
@@ -552,18 +604,19 @@ class ProviderExecutor:
                     continuation = assessment.seed
                     recovery_action = assessment.action.value
                     recovery_reason = assessment.reason
-                if index + 1 >= len(candidates):
-                    raise candidate_failure
+                if position + 1 >= len(candidates):
+                    # When the automatic fallbacks failed too, report what the configured model said.
+                    raise configured_failure or candidate_failure
                 if delivery is not None and continuation is not None:
                     delivery.begin_continuation()
-                next_target = candidates[index + 1].target
+                next_target = candidates[position + 1][1].target
                 self._trace_fallback_started(
                     request_id=request_id,
                     wire_api=wire_api,
                     failed=target,
                     selected=next_target,
                     failure=candidate_failure,
-                    candidate_index=index + 2,
+                    candidate_index=position + 2,
                     candidate_count=len(candidates),
                     recovery_action=recovery_action,
                     recovery_reason=recovery_reason,
@@ -594,3 +647,56 @@ class ProviderExecutor:
             chunk_event=None,
             extra=stream_trace,
         )
+
+
+def _ordered_candidates(
+    configured: tuple[ProviderModelCandidate, ...],
+    *,
+    auto_fallbacks: bool,
+    request_id: str,
+) -> tuple[list[tuple[int, ProviderModelCandidate]], set[str], list[tuple[int, ProviderModelCandidate]]]:
+    """The order to try candidates in, the refs of the automatic ones, and the spare automatic ones.
+
+    Without a rate limit this is the configured order, unchanged. Candidates of a provider that is rate limited right
+    now go last (soonest reset first), and then models of other providers that recently completed requests
+    (provider_health.proven_models, up to three) are tried before them. The spare ones join only once a configured
+    candidate is refused with a rate limit during this request (_insert_spare).
+    """
+    now = time.time()
+    entries = list(enumerate(configured))
+    rests = {e[1].target.provider_id: provider_health.limited_until(e[1].target.provider_id, now) for e in entries}
+    free = [e for e in entries if rests[e[1].target.provider_id] is None]
+    limited = sorted((e for e in entries if rests[e[1].target.provider_id] is not None),
+                     key=lambda e: rests[e[1].target.provider_id])
+    pool: list[tuple[int, ProviderModelCandidate]] = []
+    automatic: set[str] = set()
+    if auto_fallbacks:
+        known = {candidate.target.provider_model_ref for candidate in configured}
+        for offset, (provider_id, provider_model) in enumerate(provider_health.proven_models(known, now)):
+            ref = f"{provider_id}/{provider_model}"
+            target = ProviderModelTarget(provider_id=provider_id, provider_model=provider_model, provider_model_ref=ref)
+            pool.append((len(entries) + offset, ProviderModelCandidate(target)))
+            automatic.add(ref)
+    if limited:
+        logger.info(
+            "Rate limit: request_id={} tries {} first; {} rests until {}",
+            request_id,
+            (free or pool or limited)[0][1].target.provider_model_ref,
+            ", ".join(sorted({e[1].target.provider_id for e in limited})),
+            time.strftime("%H:%M:%S", time.localtime(min(rests[e[1].target.provider_id] for e in limited))),
+        )
+        return free + pool + limited, automatic, []
+    return free, automatic, pool
+
+
+def _insert_spare(
+    candidates: list[tuple[int, ProviderModelCandidate]],
+    position: int,
+    spare: list[tuple[int, ProviderModelCandidate]],
+    automatic: set[str],
+) -> None:
+    """Put the spare automatic fallbacks after the current candidate, before any later one of a limited provider."""
+    now = time.time()
+    at = next((i for i in range(position + 1, len(candidates))
+               if provider_health.limited_until(candidates[i][1].target.provider_id, now) is not None), len(candidates))
+    candidates[at:at] = [entry for entry in spare if entry[1].target.provider_model_ref in automatic]

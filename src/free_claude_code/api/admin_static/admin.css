@@ -1002,3 +1002,130 @@ button.startup-busy, .startup-spinner { display: inline-flex; align-items: cente
 @media (prefers-reduced-motion: reduce) {
   button.startup-busy::before, .startup-spinner::before { animation: none; }
 }
+
+/* Usage / Quota Page Styles */
+.quota-group {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  margin-bottom: 24px;
+  padding: 24px;
+}
+
+.quota-group h3 {
+  margin: 0 0 16px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-strong);
+}
+
+.quota-models-list {
+  margin: 0 0 16px;
+  font-size: 12px;
+  color: var(--muted);
+  font-family: monospace;
+  word-break: break-word;
+}
+
+.quota-providers-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.quota-provider {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  background: var(--card);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.quota-provider:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+.quota-provider-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.quota-provider-header strong {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-strong);
+}
+
+.quota-last-checked {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+
+.quota-window {
+  margin-bottom: 12px;
+}
+
+.quota-window:last-child {
+  margin-bottom: 0;
+}
+
+.quota-window-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.quota-window-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.quota-window-pct {
+  font-size: 12px;
+  font-family: monospace;
+  color: var(--muted);
+}
+
+.progress-bar {
+  height: 8px;
+  background: var(--input);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+  position: relative;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  transition: width var(--transition-normal), background var(--transition-fast);
+}
+
+.progress-fill.ok { background: var(--ok); }
+.progress-fill.warn { background: var(--warn); }
+.progress-fill.error { background: var(--error); }
+
+.quota-window-details {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.quota-window-details span {
+  font-family: monospace;
+}
+
+.quota-empty {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: italic;
+}
