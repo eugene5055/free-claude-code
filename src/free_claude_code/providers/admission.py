@@ -21,6 +21,7 @@ from free_claude_code.core.stream_delivery import (
     StreamDeliveryState,
     current_stream_delivery,
 )
+from free_claude_code.application import kimi_plan
 from free_claude_code.core.trace import trace_event
 from free_claude_code.providers.admission_capacity import ProviderCapacityLimiter
 from free_claude_code.providers.admission_policy import ProviderAdmissionLimits
@@ -372,6 +373,13 @@ class ProviderAttempt:
             effective_error = error
         status = retryable_upstream_status(effective_error)
         retryable = is_retryable_provider_error(effective_error)
+        if (
+            retryable
+            and status == 429
+            and kimi_plan.exhausted(self._controller._provider_name) is not None
+        ):
+            # A used-up Kimi Code plan window lasts hours: fail fast so other models are tried.
+            retryable = False
         self._execution._record_failure(error)
         if not retryable:
             await self._controller._attempt_rejected(self._execution, self._permit)

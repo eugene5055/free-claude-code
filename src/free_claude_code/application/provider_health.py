@@ -22,7 +22,7 @@ from loguru import logger
 
 from free_claude_code.config import paths
 
-from . import model_usability, rate_limit_headers
+from . import kimi_plan, model_usability, rate_limit_headers
 
 _BACKOFF_START, _BACKOFF_MAX = 60.0, 900.0  # seconds a limited provider rests without a header reset
 _HIT_MEMORY = 1800.0  # a 429 within this long of the last one counts as a repeat (longer backoff)
@@ -77,6 +77,10 @@ def _header_reset(provider_id: str, now: float) -> float | None:
         exhausted = window.get("remaining") == 0 or (window.get("utilization") or 0) >= 1
         if exhausted and isinstance(reset, (int, float)) and reset > now:
             resets.append(float(reset))
+    # Kimi Code sends no rate-limit headers; its plan usage says when a used-up window resets.
+    plan = kimi_plan.exhausted(provider_id, now)
+    if plan is not None:
+        resets.append(plan[0])
     return min(resets) if resets else None
 
 

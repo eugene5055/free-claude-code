@@ -24,7 +24,7 @@ from free_claude_code.core.openai_responses import (
     estimate_responses_input_tokens,
 )
 from free_claude_code.core.reasoning import ReasoningPolicy
-from free_claude_code.application import model_usability, provider_health
+from free_claude_code.application import kimi_plan, model_usability, provider_health
 from free_claude_code.application.provider_ratings import record_outcome, _kind_for_model
 from free_claude_code.core.request_outcomes import record_request_route
 from free_claude_code.core.stream_delivery import current_stream_delivery
@@ -635,6 +635,15 @@ class ProviderExecutor:
                     or candidate_failure.status_code == 429
                 ):
                     provider_health.mark_limited(target.provider_id)
+                    plan = kimi_plan.exhausted(target.provider_id)
+                    if plan is not None:
+                        # Say when Kimi Code is back instead of "retry shortly".
+                        candidate_failure = ExecutionFailure(
+                            kind=FailureKind.RATE_LIMIT,
+                            status_code=429,
+                            message=plan[1],
+                            retryable=False,
+                        )
                     # A rate limit: switch to models of other providers that worked recently (provider_health), tried
                     # before any candidate whose provider is limited. Only here, so other failures behave as before.
                     if spare:
