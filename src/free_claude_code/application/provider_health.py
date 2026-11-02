@@ -20,11 +20,10 @@ import time
 
 from loguru import logger
 
-from free_claude_code.config.paths import config_dir_path
+from free_claude_code.config import paths
 
 from . import model_usability, rate_limit_headers
 
-_PATH = config_dir_path() / "provider_health.json"
 _BACKOFF_START, _BACKOFF_MAX = 60.0, 900.0  # seconds a limited provider rests without a header reset
 _HIT_MEMORY = 1800.0  # a 429 within this long of the last one counts as a repeat (longer backoff)
 _PROVEN_MAX_AGE = 7 * 86400.0
@@ -32,16 +31,24 @@ _AUTO_FALLBACKS = 3
 
 _lock = threading.Lock()
 _state: dict[str, dict] = {"limited": {}, "proven": {}}
-_loaded = False
+_loaded_from = None
+
+
+def _path():
+    """Resolved per call, so a changed config directory (tests, FCC_HOME) is honored."""
+    return paths.config_dir_path() / "provider_health.json"
 
 
 def _load() -> None:
-    global _loaded
-    if _loaded:
+    global _loaded_from
+    path = _path()
+    if path == _loaded_from:
         return
-    _loaded = True
+    _loaded_from = path
+    _state.clear()
+    _state.update({"limited": {}, "proven": {}})
     try:
-        data = json.loads(_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return
     if isinstance(data, dict):
@@ -51,10 +58,12 @@ def _load() -> None:
 
 
 def _save() -> None:
-    tmp = _PATH.with_suffix(".tmp")
+    path = _path()
+    tmp = path.with_suffix(".tmp")
     try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         tmp.write_text(json.dumps(_state), encoding="utf-8")
-        os.replace(tmp, _PATH)
+        os.replace(tmp, path)
     except OSError as exc:
         logger.debug("Could not save provider health: {}", exc)
 

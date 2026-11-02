@@ -12,7 +12,7 @@ import math
 import sqlite3
 from pathlib import Path
 
-from free_claude_code.config.paths import config_dir_path
+from free_claude_code.config import paths
 
 DECAY = 0.97
 LEAST = 5
@@ -21,11 +21,14 @@ TIME_TARGETS = {"messages": 300}
 DEFAULT_TIME_TARGET = 300
 TIMING_COVERAGE = 0.9
 
-_DB_PATH = config_dir_path() / "provider_ratings.db"
+
+def _db_path():
+    """Resolved per call, so a changed config directory (tests, FCC_HOME) is honored."""
+    return paths.config_dir_path() / "provider_ratings.db"
 
 
 def _connect():
-    path = _DB_PATH
+    path = _db_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     con = sqlite3.connect(path, timeout=5)
     con.executescript(

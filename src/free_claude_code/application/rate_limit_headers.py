@@ -19,26 +19,32 @@ from urllib.parse import urlsplit
 
 from loguru import logger
 
-from free_claude_code.config.paths import config_dir_path
+from free_claude_code.config import paths
 from free_claude_code.core.request_outcomes import current_request_outcome
 
-_STORE_PATH = config_dir_path() / "rate_limits.json"
 _ROLES = ("limit", "remaining", "reset", "utilization", "used")
 _DURATION = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)")
 
 _lock = threading.Lock()
 _state: dict[str, dict[str, dict[str, float | None]]] = {}
-_loaded = False
+_loaded_from = None
 _installed = False
 
 
+def _path():
+    """Resolved per call, so a changed config directory (tests, FCC_HOME) is honored."""
+    return paths.config_dir_path() / "rate_limits.json"
+
+
 def _load() -> None:
-    global _loaded
-    if _loaded:
+    global _loaded_from
+    path = _path()
+    if path == _loaded_from:
         return
-    _loaded = True
+    _loaded_from = path
+    _state.clear()
     try:
-        data = json.loads(_STORE_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
             _state.update(data)
     except (OSError, ValueError):
@@ -46,10 +52,12 @@ def _load() -> None:
 
 
 def _save() -> None:
-    tmp = _STORE_PATH.with_suffix(".tmp")
+    path = _path()
+    tmp = path.with_suffix(".tmp")
     try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         tmp.write_text(json.dumps(_state), encoding="utf-8")
-        os.replace(tmp, _STORE_PATH)
+        os.replace(tmp, path)
     except OSError as exc:
         logger.debug("Could not save rate limits: {}", exc)
 

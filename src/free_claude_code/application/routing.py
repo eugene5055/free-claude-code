@@ -240,7 +240,8 @@ class ModelRouter:
             )
             if ref != primary.provider_model_ref
         )
-        # Paid and blocked fallbacks are skipped (model_usability.offered).
+        # Paid and blocked fallbacks are skipped (model_usability.offered), except on the primary's own provider:
+        # the request already bills that provider, so skipping would only fail it.
         configured = siblings + tuple(
             ProviderModelCandidate(
                 self._target_from_ref(entry.model, entry.api_key_number),
@@ -248,6 +249,10 @@ class ModelRouter:
             )
             for entry in self._settings.model_fallbacks or ()
             if model_usability.offered(entry.model)
+            or (
+                entry.model.partition("/")[0] == primary.provider_id
+                and not model_usability.blocked(entry.model)
+            )
         )
         seen = {primary}
         unique = []

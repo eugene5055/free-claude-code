@@ -20,10 +20,15 @@ import time
 
 from loguru import logger
 
-from free_claude_code.config.paths import config_dir_path
+from free_claude_code.config import paths
 from free_claude_code.core.failures import ExecutionFailure, FailureKind
 
-PATH = config_dir_path() / "model_usability.json"
+
+def _path():
+    """Resolved per call, so a changed config directory (tests, FCC_HOME) is honored."""
+    return paths.config_dir_path() / "model_usability.json"
+
+
 # 400s are usually about the request, so only these messages make a 400 count as a dead model.
 _DEAD_400 = re.compile(
     r"credit|balance|billing|quota|insufficient|payment|not found|does not exist|no such model|"
@@ -44,20 +49,24 @@ _TTFT_WEIGHT = 0.3  # newest sample's share of the running time-to-first-output 
 _lock = threading.Lock()
 _state: dict[str, dict] = {}
 _mtime: float | None = None
+_loaded_from = None
 
 
 def _load() -> None:
     """Re-read the file when another process (the probe) changed it."""
-    global _state, _mtime
+    global _state, _mtime, _loaded_from
+    path = _path()
+    if path != _loaded_from:
+        _state, _mtime, _loaded_from = {}, None, path
     try:
-        mtime = PATH.stat().st_mtime
+        mtime = path.stat().st_mtime
     except OSError:
         _state, _mtime = {}, None
         return
     if mtime == _mtime:
         return
     try:
-        data = json.loads(PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return
     _state = data if isinstance(data, dict) else {}
@@ -66,11 +75,13 @@ def _load() -> None:
 
 def _save() -> None:
     global _mtime
-    tmp = PATH.with_suffix(".tmp")
+    path = _path()
+    tmp = path.with_suffix(".tmp")
     try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         tmp.write_text(json.dumps(_state, indent=0, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, PATH)
-        _mtime = PATH.stat().st_mtime
+        os.replace(tmp, path)
+        _mtime = path.stat().st_mtime
     except OSError as exc:
         logger.debug("Could not save model usability: {}", exc)
 
@@ -99,10 +110,18 @@ def is_free(provider_model_ref: str) -> bool:
 _BLOCKED = re.compile(r"nemotron-[0-9.]+-(super|lightning)", re.IGNORECASE)
 
 
+def blocked(provider_model_ref: str) -> bool:
+    return bool(_BLOCKED.search(provider_model_ref))
+
+
 def offered(provider_model_ref: str) -> bool:
-    """Free or flat-rate, and not blocked: the models fcc lists and routes to."""
-    flat_rate = provider_model_ref.partition("/")[0] in FLAT_RATE_PROVIDERS
-    return (is_free(provider_model_ref) or flat_rate) and not _BLOCKED.search(provider_model_ref)
+    """Free, flat-rate or user-defined, and not blocked: the models fcc lists and routes to.
+
+    A custom provider (custom_<id>) is an endpoint the user defined by hand, like the local ones in FREE_PROVIDERS.
+    """
+    provider = provider_model_ref.partition("/")[0]
+    chosen = provider in FLAT_RATE_PROVIDERS or provider.startswith("custom_")
+    return (is_free(provider_model_ref) or chosen) and not blocked(provider_model_ref)
 
 
 def is_dead_failure(failure: ExecutionFailure) -> bool:
