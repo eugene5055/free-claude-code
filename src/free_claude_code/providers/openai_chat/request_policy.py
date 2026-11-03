@@ -44,6 +44,8 @@ class OpenAIChatRequestPolicy:
     strip_message_names: bool = False
     unsupported_body_keys: frozenset[str] = field(default_factory=frozenset)
     normalize_n_to_one: bool = False
+    # Ask for parallel tool calls explicitly; Anthropic's disable flag wins.
+    parallel_tool_calls: bool = False
 
 
 def build_openai_chat_request_body(
@@ -85,6 +87,9 @@ def build_openai_chat_request_body(
                     raise InvalidRequestError(str(exc)) from exc
             body["extra_body"] = extra_body
 
+    if policy.parallel_tool_calls:
+        _request_parallel_tool_calls(body, request_data.tool_choice)
+
     apply_openai_chat_body_policy(body, policy)
 
     for postprocess in postprocessors:
@@ -100,6 +105,18 @@ def build_openai_chat_request_body(
         len(body.get("tools", [])),
     )
     return body
+
+
+def _request_parallel_tool_calls(
+    body: dict[str, Any], tool_choice: dict[str, Any] | None
+) -> None:
+    if not body.get("tools") or body.get("tool_choice") == "none":
+        return
+    disabled = (
+        isinstance(tool_choice, dict)
+        and tool_choice.get("disable_parallel_tool_use") is True
+    )
+    body.setdefault("parallel_tool_calls", not disabled)
 
 
 def apply_openai_chat_body_policy(

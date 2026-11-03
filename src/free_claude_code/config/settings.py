@@ -53,6 +53,48 @@ def _validate_model_ref(value: str) -> str:
     return value
 
 
+def parse_reasoning_provider_policies(value: str | None) -> dict[str, ReasoningPreference]:
+    """Parse ``provider=preference`` pairs; INHERIT is not a root choice."""
+    result: dict[str, ReasoningPreference] = {}
+    for item in (value or "").split(","):
+        if not item.strip():
+            continue
+        provider, sep, raw = item.partition("=")
+        if not sep or not provider.strip():
+            raise ValueError(
+                f"REASONING_PROVIDER_POLICIES entry {item!r} needs provider=policy"
+            )
+        preference = ReasoningPreference(raw.strip().lower())
+        if preference is ReasoningPreference.INHERIT:
+            raise ValueError("REASONING_PROVIDER_POLICIES entries cannot inherit")
+        result[provider.strip()] = preference
+    return result
+
+
+def parse_provider_admission_limits(
+    value: str | None,
+) -> dict[str, tuple[int, float, int]]:
+    """Parse ``provider=rate/window/concurrency`` pairs, e.g. ``qwencloud=10/1/8``."""
+    result: dict[str, tuple[int, float, int]] = {}
+    for item in (value or "").split(","):
+        if not item.strip():
+            continue
+        provider, sep, raw = item.partition("=")
+        parts = raw.split("/")
+        if not sep or not provider.strip() or len(parts) != 3:
+            raise ValueError(
+                f"PROVIDER_ADMISSION_LIMITS entry {item!r} needs "
+                "provider=rate/window/concurrency"
+            )
+        rate, window, concurrency = int(parts[0]), float(parts[1]), int(parts[2])
+        if rate <= 0 or concurrency <= 0 or not 0 < window < float("inf"):
+            raise ValueError(
+                f"PROVIDER_ADMISSION_LIMITS entry {item!r} needs positive values"
+            )
+        result[provider.strip()] = (rate, window, concurrency)
+    return result
+
+
 class Settings(BaseModel):
     """Validated application settings with no file or process I/O."""
 
@@ -608,6 +650,12 @@ class Settings(BaseModel):
     provider_max_concurrency: int = Field(
         default=2, gt=0, validation_alias="PROVIDER_MAX_CONCURRENCY"
     )
+    # Comma-separated provider=rate/window/concurrency overrides of the three
+    # limits above, for providers whose real limits are higher (Alibaba Token
+    # Plan, Kimi Code) while the small free tiers keep the defaults.
+    provider_admission_limits: str | None = Field(
+        default=None, validation_alias="PROVIDER_ADMISSION_LIMITS"
+    )
     provider_progress_timeout: float = Field(
         default=600.0,
         gt=0,
@@ -620,6 +668,13 @@ class Settings(BaseModel):
     reasoning_policy: ReasoningPreference = Field(
         default=ReasoningPreference.CLIENT,
         validation_alias="REASONING_POLICY",
+    )
+    # Comma-separated provider=preference overrides for direct provider/model
+    # refs, e.g. "kimi_code=low" keeps an always-thinking model on its lowest
+    # level while REASONING_POLICY=off covers every other route.
+    reasoning_provider_policies: str | None = Field(
+        default=None,
+        validation_alias="REASONING_PROVIDER_POLICIES",
     )
     reasoning_fable: ReasoningPreference = Field(
         default=ReasoningPreference.INHERIT,
@@ -776,6 +831,24 @@ class Settings(BaseModel):
         if value is ReasoningPreference.INHERIT:
             raise ValueError("REASONING_POLICY cannot inherit")
         return value
+
+    @field_validator("provider_admission_limits")
+    @classmethod
+    def validate_provider_admission_limits(cls, value: str | None) -> str | None:
+        parse_provider_admission_limits(value)
+        return value
+
+    @field_validator("reasoning_provider_policies")
+    @classmethod
+    def validate_reasoning_provider_policies(cls, value: str | None) -> str | None:
+        parse_reasoning_provider_policies(value)
+        return value
+
+    def provider_reasoning_policy(self, provider_id: str) -> ReasoningPreference:
+        """Return the provider override, else the root reasoning policy."""
+        return parse_reasoning_provider_policies(
+            self.reasoning_provider_policies
+        ).get(provider_id, self.reasoning_policy)
 
     @field_validator("whisper_device")
     @classmethod

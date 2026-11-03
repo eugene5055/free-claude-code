@@ -68,7 +68,9 @@ def test_omitted_output_limit_preserves_kimi_default(kimi_code_provider):
 
     assert "max_tokens" not in body
     assert "max_completion_tokens" not in body
-    assert "reasoning_effort" not in body
+    # Duo explicit-reasoning contract: an omitted client effort still sends
+    # Kimi's lowest level rather than leaving the always-thinking default.
+    assert body["reasoning_effort"] == "none"
 
 
 @pytest.mark.parametrize(

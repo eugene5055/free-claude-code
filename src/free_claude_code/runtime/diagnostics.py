@@ -43,6 +43,7 @@ RUNTIME_FIELDS = (
     "provider_rate_limit",
     "provider_rate_window",
     "provider_max_concurrency",
+    "provider_admission_limits",
     "provider_progress_timeout",
     "http_read_timeout",
     "http_write_timeout",
@@ -74,6 +75,7 @@ ROUTING_FIELDS = (
 )
 REASONING_FIELDS = (
     "reasoning_policy",
+    "reasoning_provider_policies",
     "reasoning_fable",
     "reasoning_opus",
     "reasoning_sonnet",

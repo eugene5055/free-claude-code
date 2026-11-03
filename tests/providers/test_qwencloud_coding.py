@@ -116,16 +116,17 @@ def test_build_request_body_preserves_explicit_client_cap(
 
 
 @pytest.mark.parametrize(
-    "reasoning",
+    ("reasoning", "effort"),
     [
-        REASONING_OFF,
-        REASONING_ON,
-        ReasoningPolicy.on(effort=ReasoningEffort.MAX),
+        (REASONING_OFF, "none"),
+        (REASONING_ON, "high"),
+        (ReasoningPolicy.on(effort=ReasoningEffort.MAX), "high"),
     ],
 )
-def test_build_request_body_does_not_invent_catalog_wide_reasoning_control(
+def test_build_request_body_sends_explicit_effort_without_vendor_thinking_fields(
     qwencloud_coding_provider: OpenAIChatProvider,
     reasoning: ReasoningPolicy,
+    effort: str,
 ) -> None:
     request = MessagesRequest.model_validate(
         {
@@ -138,12 +139,16 @@ def test_build_request_body_does_not_invent_catalog_wide_reasoning_control(
         request, reasoning=reasoning
     )
     extra_body = body.get("extra_body", {})
+    # Duo explicit-reasoning contract: the standard OpenAI reasoning_effort is
+    # always sent (lowest level when reasoning is off) so Token Plan models
+    # never fall back to their maximum default thinking; vendor-specific
+    # thinking fields are still never invented.
+    assert body["reasoning_effort"] == effort
 
     for field in (
         "enable_thinking",
         "preserve_thinking",
         "reasoning",
-        "reasoning_effort",
         "thinking",
         "thinking_budget",
         "tool_stream",

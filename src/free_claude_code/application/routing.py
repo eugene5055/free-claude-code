@@ -141,7 +141,7 @@ class ModelRouter:
             reasoning_preference = (
                 ReasoningPreference.OFF
                 if force_reasoning_off
-                else self._settings.reasoning_policy
+                else self._settings.provider_reasoning_policy(direct_provider_id)
             )
             logger.debug(
                 "MODEL DIRECT: '{}' -> provider='{}' model='{}' reasoning={}",

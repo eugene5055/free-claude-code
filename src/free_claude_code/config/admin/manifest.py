@@ -173,6 +173,12 @@ _NON_PROVIDER_FIELDS: tuple[ConfigFieldSpec, ...] = (
         options=_reasoning_options(ROUTE_REASONING_PREFERENCES),
     ),
     ConfigFieldSpec(
+        "REASONING_PROVIDER_POLICIES",
+        "Per-Provider Effort",
+        "models",
+        settings_attr="reasoning_provider_policies",
+    ),
+    ConfigFieldSpec(
         "REASONING_HAIKU",
         "Haiku Effort",
         "models",
@@ -222,6 +228,12 @@ _NON_PROVIDER_FIELDS: tuple[ConfigFieldSpec, ...] = (
         "runtime",
         "number",
         settings_attr="provider_max_concurrency",
+    ),
+    ConfigFieldSpec(
+        "PROVIDER_ADMISSION_LIMITS",
+        "Per-Provider Admission Limits",
+        "runtime",
+        settings_attr="provider_admission_limits",
     ),
     ConfigFieldSpec(
         "PROVIDER_PROGRESS_TIMEOUT",

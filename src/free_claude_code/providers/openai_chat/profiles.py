@@ -29,6 +29,7 @@ from .reasoning import (
     NO_REASONING,
     SPLIT_REASONING_OUTPUT,
     ChatTemplateReasoning,
+    ModelFamilyReasoning,
     NamedEffortReasoning,
     ReasoningEncoder,
     ReasoningObject,
@@ -70,6 +71,60 @@ _KIMI_CODE_EFFORTS = (
     (ReasoningEffort.MAX, "max"),
 )
 _TEXT_INPUT_MODALITIES = frozenset({ModelInputModality.TEXT})
+# Probed on Alibaba Token Plan 2026-11-02: GLM accepts only low/high/max (low
+# yields no reasoning); Qwen and DeepSeek accept none through high.
+_GLM_EFFORTS = (
+    (ReasoningEffort.MINIMAL, "low"),
+    (ReasoningEffort.LOW, "low"),
+    (ReasoningEffort.MEDIUM, "low"),
+    (ReasoningEffort.HIGH, "high"),
+    (ReasoningEffort.XHIGH, "max"),
+    (ReasoningEffort.MAX, "max"),
+)
+_QWEN_EFFORTS = (
+    (ReasoningEffort.MINIMAL, "minimal"),
+    (ReasoningEffort.LOW, "low"),
+    (ReasoningEffort.MEDIUM, "medium"),
+    (ReasoningEffort.HIGH, "high"),
+    (ReasoningEffort.XHIGH, "high"),
+    (ReasoningEffort.MAX, "high"),
+)
+_GLM_REASONING = NamedEffortReasoning(
+    _GLM_EFFORTS, disabled_value="low", enabled_value="high"
+)
+QWENCLOUD_REASONING = ModelFamilyReasoning(
+    families=(
+        (r"^glm", _GLM_REASONING),
+        (
+            r"^qwen",
+            NamedEffortReasoning(
+                _QWEN_EFFORTS, disabled_value="none", enabled_value="high"
+            ),
+        ),
+        (
+            r"^deepseek",
+            NamedEffortReasoning(
+                _LOW_MEDIUM_HIGH, disabled_value="none", enabled_value="high"
+            ),
+        ),
+    ),
+    # "low" is the one value every probed Token Plan family accepts.
+    fallback=_GLM_REASONING,
+)
+KIMI_CODE_REASONING = ModelFamilyReasoning(
+    families=(
+        # K3 Pro always thinks: it refuses "none", so OFF clamps to "low".
+        (
+            r"^k3.*pro",
+            NamedEffortReasoning(
+                _KIMI_CODE_EFFORTS, disabled_value="low", enabled_value="max"
+            ),
+        ),
+    ),
+    fallback=NamedEffortReasoning(
+        _KIMI_CODE_EFFORTS, disabled_value="none", enabled_value="max"
+    ),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +286,9 @@ def _zai_profile(provider_name: str) -> OpenAIChatProfile:
                 "requests."
             ),
             default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
+            # Probed 2026-11-02: z.ai GLM accepts parallel_tool_calls and returns
+            # two tool calls in one turn.
+            parallel_tool_calls=True,
         ),
         ThinkingObjectReasoning(
             enabled={"type": "enabled", "clear_thinking": False},
@@ -269,15 +327,17 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
             "QWENCLOUD",
             ReasoningReplayMode.REASONING_CONTENT,
             default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
+            parallel_tool_calls=True,
         ),
-        NO_REASONING,
+        QWENCLOUD_REASONING,
     ),
     "qwencloud_coding": OpenAIChatProfile(
         _policy(
             "QWENCLOUD_CODING",
             ReasoningReplayMode.REASONING_CONTENT,
+            parallel_tool_calls=True,
         ),
-        NO_REASONING,
+        QWENCLOUD_REASONING,
     ),
     "together": OpenAIChatProfile(
         _policy(
@@ -571,12 +631,11 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
                 "extra_body on requests."
             ),
             max_tokens_field="max_completion_tokens",
+            # Probed 2026-11-02: kimi-for-coding accepts parallel_tool_calls and
+            # returns two tool calls in one turn.
+            parallel_tool_calls=True,
         ),
-        NamedEffortReasoning(
-            _KIMI_CODE_EFFORTS,
-            disabled_value="none",
-            enabled_value="max",
-        ),
+        KIMI_CODE_REASONING,
         user_agent="free-claude-code",
     ),
     "minimax": OpenAIChatProfile(

@@ -29,18 +29,21 @@ class ProviderAdmissionRegistry:
             raise RuntimeError("Provider admission registry is closed")
         if provider_id not in self._controllers:
             self._controllers[provider_id] = {}
-            self._capacities[provider_id] = ProviderCapacityLimiter(self._limits)
+            self._capacities[provider_id] = ProviderCapacityLimiter(
+                self._limits.for_provider(provider_id)
+            )
         credential = sha256(api_key.encode()).digest() if api_key else None
         controllers = self._controllers[provider_id]
         if credential not in controllers:
             # Provider preparation loads SDKs in a worker before reaching here.
             from free_claude_code.providers.admission import ProviderAdmissionController
 
+            limits = self._limits.for_provider(provider_id)
             controllers[credential] = ProviderAdmissionController(
                 provider_name=provider_id,
-                rate_limit=self._limits.rate_limit,
-                rate_window=self._limits.rate_window,
-                max_concurrency=self._limits.max_concurrency,
+                rate_limit=limits.rate_limit,
+                rate_window=limits.rate_window,
+                max_concurrency=limits.max_concurrency,
                 capacity=self._capacities[provider_id],
             )
         return controllers[credential]
@@ -48,8 +51,8 @@ class ProviderAdmissionRegistry:
     def reconfigure(self, limits: ProviderAdmissionLimits) -> None:
         """Publish validated limits without yielding to waiting requests."""
         self._limits = limits
-        for capacity in self._capacities.values():
-            capacity.reconfigure(limits)
+        for provider_id, capacity in self._capacities.items():
+            capacity.reconfigure(limits.for_provider(provider_id))
 
     def retain_custom(self, provider_ids: Iterable[str]) -> None:
         retained = set(provider_ids)

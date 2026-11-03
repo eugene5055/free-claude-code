@@ -97,10 +97,13 @@ def test_build_request_body_preserves_common_chat_tools_and_images(
     assert body["tools"][0]["function"]["name"] == "inspect_image"
 
 
-@pytest.mark.parametrize("reasoning", [REASONING_OFF, REASONING_ON])
-def test_build_request_body_does_not_invent_catalog_wide_reasoning_control(
+@pytest.mark.parametrize(
+    ("reasoning", "effort"), [(REASONING_OFF, "none"), (REASONING_ON, "high")]
+)
+def test_build_request_body_sends_explicit_effort_without_vendor_thinking_fields(
     qwencloud_provider: OpenAIChatProvider,
     reasoning,
+    effort: str,
 ) -> None:
     request = MessagesRequest.model_validate(
         {
@@ -111,11 +114,15 @@ def test_build_request_body_does_not_invent_catalog_wide_reasoning_control(
 
     body = qwencloud_provider._chat._build_request_body(request, reasoning=reasoning)
     extra_body = body.get("extra_body", {})
+    # Duo explicit-reasoning contract: the standard OpenAI reasoning_effort is
+    # always sent (lowest level when reasoning is off) so Token Plan models
+    # never fall back to their maximum default thinking; vendor-specific
+    # thinking fields are still never invented.
+    assert body["reasoning_effort"] == effort
 
     for field in (
         "enable_thinking",
         "preserve_thinking",
-        "reasoning_effort",
         "thinking_budget",
     ):
         assert field not in body

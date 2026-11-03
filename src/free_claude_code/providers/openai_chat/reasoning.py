@@ -1,5 +1,6 @@
 """Provider-owned reasoning translations for OpenAI-compatible APIs."""
 
+import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -148,6 +149,42 @@ class SplitReasoningOutput:
 
     def encode(self, body: dict[str, Any], policy: ReasoningPolicy) -> None:
         _extra_body(body)["reasoning_split"] = True
+
+
+@dataclass(frozen=True, slots=True)
+class ModelFamilyReasoning:
+    """Choose each model family's accepted vocabulary and always send a control.
+
+    Multi-model gateways (Alibaba Token Plan, Kimi Code) accept different
+    ``reasoning_effort`` values per model: GLM refuses ``none``/``minimal``/
+    ``medium``, Qwen and DeepSeek accept ``none``, Kimi K3 Pro cannot stop
+    thinking. Unsupported values are clamped to the nearest accepted one, and a
+    request without client intent gets the family's lowest explicit level
+    instead of the upstream default (which is maximum thinking).
+    """
+
+    families: tuple[tuple[str, NamedEffortReasoning], ...]
+    fallback: NamedEffortReasoning
+
+    @property
+    def off_field(self) -> tuple[str, ...]:
+        return (self.fallback.field,)
+
+    def encoder_for(self, model: object) -> NamedEffortReasoning:
+        name = str(model or "").lower().rpartition("/")[2]
+        for pattern, encoder in self.families:
+            if re.search(pattern, name):
+                return encoder
+        return self.fallback
+
+    def encode(self, body: dict[str, Any], policy: ReasoningPolicy) -> None:
+        if (
+            policy.control is ReasoningControl.DEFAULT
+            and policy.effort is None
+            and policy.budget_tokens is None
+        ):
+            policy = ReasoningPolicy.off()
+        self.encoder_for(body.get("model")).encode(body, policy)
 
 
 def _extra_body(body: dict[str, Any]) -> dict[str, Any]:
