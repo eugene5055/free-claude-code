@@ -1008,3 +1008,59 @@ async def test_provider_controllers_do_not_share_recovery_state() -> None:
     probe = await _open(first_execution)
     await probe.accept()
     await probe.aclose()
+
+
+def _quota_error(message: str) -> openai.RateLimitError:
+    request = httpx.Request("POST", "https://provider.test/chat/completions")
+    body = {"errors": [{"message": message, "code": 4006}], "success": False}
+    response = httpx.Response(429, request=request, json=body)
+    return openai.RateLimitError(message, response=response, body=body)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "AiError: AiError: you have used up your daily free allocation of 10,000 neurons, please upgrade",
+        "Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day",
+        "Rate limit reached for model `llama` on tokens per day (TPD): Limit 500000, Used 499990",
+    ],
+)
+async def test_a_used_up_daily_allowance_is_attempted_once(message: str) -> None:
+    controller = _controller()
+    attempts = 0
+
+    async def refuse() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise _quota_error(message)
+
+    with pytest.raises(openai.RateLimitError):
+        await controller.start_execution().run_call(
+            refuse,
+            operation_kind=ProviderOperationKind.GENERATION,
+        )
+
+    assert attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_a_per_minute_429_still_retries() -> None:
+    controller = _controller()
+    attempts = 0
+
+    async def refuse_then_answer() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise _quota_error("Rate limit exceeded: free-models-per-min.")
+        return "ok"
+
+    assert (
+        await controller.start_execution().run_call(
+            refuse_then_answer,
+            operation_kind=ProviderOperationKind.GENERATION,
+        )
+        == "ok"
+    )
+    assert attempts == 2

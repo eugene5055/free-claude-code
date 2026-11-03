@@ -23,6 +23,12 @@ from free_claude_code.core.failures import ExecutionFailure, FailureKind
 ProviderFailureOverride = Callable[[Exception], ExecutionFailure | None]
 
 _RATE_LIMIT_MARKERS = frozenset({"rate_limit", "rate limit", "too many requests"})
+# A refusal that names a used-up daily allowance: retrying the same provider cannot succeed until the day resets.
+# Cloudflare Workers AI code 4006 ("used up your daily free allocation of 10,000 neurons"), OpenRouter's
+# free-models-per-day limit, and Groq's per-day token or request limits.
+_DAILY_QUOTA_MARKERS = frozenset(
+    {"daily free allocation", "free-models-per-day", "tokens per day", "requests per day"}
+)
 _OVERLOAD_MARKERS = frozenset(
     {
         "resourceexhausted",
@@ -222,6 +228,11 @@ def transient_error_text(exc: BaseException) -> str:
         with suppress(Exception):
             parts.append(response.text)
     return " ".join(part for part in parts if part).lower()
+
+
+def is_daily_quota_exhausted(exc: BaseException) -> bool:
+    """Return whether a refusal says the provider's daily allowance is used up."""
+    return _has_marker(transient_error_text(exc), _DAILY_QUOTA_MARKERS)
 
 
 def is_retryable_provider_error(exc: BaseException) -> bool:

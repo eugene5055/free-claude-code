@@ -26,6 +26,7 @@ from free_claude_code.core.trace import trace_event
 from free_claude_code.providers.admission_capacity import ProviderCapacityLimiter
 from free_claude_code.providers.admission_policy import ProviderAdmissionLimits
 from free_claude_code.providers.failure_policy import (
+    is_daily_quota_exhausted,
     ProviderFailureOverride,
     ProviderRecoveryExhausted,
     is_retryable_provider_error,
@@ -376,9 +377,13 @@ class ProviderAttempt:
         if (
             retryable
             and status == 429
-            and kimi_plan.exhausted(self._controller._provider_name) is not None
+            and (
+                kimi_plan.exhausted(self._controller._provider_name) is not None
+                or is_daily_quota_exhausted(effective_error)
+            )
         ):
-            # A used-up Kimi Code plan window lasts hours: fail fast so other models are tried.
+            # A used-up Kimi Code plan window or daily allowance lasts hours: fail fast so other models
+            # are tried for this request, instead of ten retries that cannot succeed.
             retryable = False
         self._execution._record_failure(error)
         if not retryable:
