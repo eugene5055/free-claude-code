@@ -231,6 +231,40 @@ class OpenAIChatProfile:
         return (*self.postprocessors, self.apply_reasoning)
 
 
+def drop_empty_assistant_turns(
+    body: dict[str, Any], _request: MessagesRequest, _policy: ReasoningPolicy
+) -> None:
+    """Drop assistant turns that carry no text and no tool calls.
+
+    Conversion keeps a thinking-only or empty assistant turn as a single space; Cohere
+    rejects any such turn ("must have non-empty content or tool calls") and fails the
+    whole request, while two user turns in a row are accepted.
+    """
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        body["messages"] = [m for m in messages if not _is_empty_assistant_turn(m)]
+
+
+def _is_empty_assistant_turn(message: Any) -> bool:
+    if not isinstance(message, Mapping) or message.get("role") != "assistant":
+        return False
+    if message.get("tool_calls"):
+        return False
+    content = message.get("content")
+    if content is None:
+        return True
+    if isinstance(content, str):
+        return not content.strip()
+    if isinstance(content, list):
+        return all(
+            isinstance(part, Mapping)
+            and part.get("type", "text") == "text"
+            and not str(part.get("text") or "").strip()
+            for part in content
+        )
+    return False
+
+
 def _apply_cohere_request_quirks(
     body: dict[str, Any], request: MessagesRequest, _policy: ReasoningPolicy
 ) -> None:
@@ -594,7 +628,7 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
             disabled_value="none",
             enabled_value="high",
         ),
-        postprocessors=(_apply_cohere_request_quirks,),
+        postprocessors=(_apply_cohere_request_quirks, drop_empty_assistant_turns),
     ),
     "wafer": OpenAIChatProfile(
         _policy(

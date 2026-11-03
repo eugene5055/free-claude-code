@@ -291,3 +291,25 @@ async def test_cleanup(cohere_provider):
     await cohere_provider.cleanup()
 
     cohere_provider._client.close.assert_called_once()
+
+
+def test_build_request_body_drops_blank_assistant_turns(cohere_provider):
+    body = cohere_provider._chat._build_request_body(
+        make_request(
+            messages=[
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "hmm", "signature": "sig"}
+                    ],
+                },
+                {"role": "user", "content": "say hi"},
+            ]
+        )
+    )
+
+    assert [m["role"] for m in body["messages"] if m["role"] != "system"] == [
+        "user",
+        "user",
+    ]

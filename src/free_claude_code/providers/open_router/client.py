@@ -20,6 +20,7 @@ from free_claude_code.providers.openai_chat import (
     ReasoningObject,
     validate_extra_body_does_not_override_canonical_fields,
 )
+from free_claude_code.providers.openai_chat.profiles import drop_empty_assistant_turns
 from free_claude_code.providers.reasoning_compatibility import (
     reasoning_control_rejected,
 )
@@ -106,8 +107,15 @@ class OpenRouterProvider(OpenAIChatProvider):
         )
 
 
+def _drop_empty_assistant_turns_for_cohere(body, request, policy) -> None:
+    """Cohere models behind OpenRouter reject blank assistant turns; others keep them."""
+    if str(body.get("model", "")).startswith("cohere/"):
+        drop_empty_assistant_turns(body, request, policy)
+
+
 _PROFILE = OpenAIChatProfile(
     _REQUEST_POLICY,
     ReasoningObject(tuple((effort, effort.value) for effort in ReasoningEffort)),
     structured_reasoning_details=True,
+    postprocessors=(_drop_empty_assistant_turns_for_cohere,),
 )

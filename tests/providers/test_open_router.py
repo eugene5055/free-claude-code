@@ -494,3 +494,55 @@ async def test_cleanup_closes_openai_client(open_router_provider):
     await open_router_provider.cleanup()
 
     open_router_provider._client.close.assert_awaited_once()
+
+
+_THINKING_ONLY_HISTORY = [
+    {"role": "user", "content": "hi"},
+    {
+        "role": "assistant",
+        "content": [{"type": "thinking", "thinking": "hmm", "signature": "sig"}],
+    },
+    {"role": "user", "content": "say hi"},
+]
+
+
+@pytest.mark.parametrize(
+    ("model", "kept"),
+    [("cohere/north-mini-code:free", False), ("moonshotai/kimi-k2.6:free", True)],
+)
+def test_cohere_routes_drop_blank_assistant_turns(open_router_provider, model, kept):
+    body = open_router_provider._chat._build_request_body(
+        make_messages_request(model, messages=_THINKING_ONLY_HISTORY)
+    )
+
+    roles = [message["role"] for message in body["messages"]]
+    assert ("assistant" in roles) is kept
+    assert roles.count("user") == 2
+
+
+def test_drop_empty_assistant_turns_keeps_text_and_tool_calls():
+    from free_claude_code.providers.openai_chat.profiles import (
+        drop_empty_assistant_turns,
+    )
+
+    call = [
+        {"id": "c", "type": "function", "function": {"name": "f", "arguments": "{}"}}
+    ]
+    body = {
+        "messages": [
+            {"role": "assistant", "content": " "},
+            {"role": "assistant", "content": ""},
+            {"role": "assistant", "content": None},
+            {"role": "assistant", "content": [{"type": "text", "text": "  "}]},
+            {"role": "assistant", "content": "", "tool_calls": call},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": " "},
+        ]
+    }
+    drop_empty_assistant_turns(body, None, None)
+
+    assert body["messages"] == [
+        {"role": "assistant", "content": "", "tool_calls": call},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": " "},
+    ]
