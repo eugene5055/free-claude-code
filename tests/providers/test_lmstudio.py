@@ -20,7 +20,6 @@ from free_claude_code.core.openai_responses import (
     OpenAIResponsesRequest,
 )
 from free_claude_code.core.reasoning import ReasoningEffort, ReasoningPolicy
-from free_claude_code.core.stream_recovery import ContinuationSeed
 from free_claude_code.providers.admission import ProviderAdmissionController
 from free_claude_code.providers.lmstudio import LMStudioProvider
 from tests.application.test_execution import (
@@ -35,6 +34,7 @@ from tests.providers.support import (
     REASONING_OFF,
     REASONING_ON,
     SDKStreamDouble,
+    continuation_seed,
     immediate_admission,
     make_provider_config,
 )
@@ -401,7 +401,7 @@ async def test_continuation_prefix_counts_before_generation(lmstudio_provider, w
         await anext(
             getattr(lmstudio_provider, f"stream_{wire}")(
                 request,
-                continuation=ContinuationSeed("large " * 10000, "consider this"),
+                continuation=continuation_seed("large " * 10000, "consider this"),
             )
         )
     assert error.value.kind is FailureKind.CONTEXT_WINDOW_EXCEEDED
@@ -413,7 +413,7 @@ async def test_continuation_prefix_counts_before_generation(lmstudio_provider, w
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wire", ["messages", "responses"])
-async def test_primary_context_validation_counts_toward_progress_timeout(
+async def test_cancelling_primary_context_validation_closes_lookup(
     wire,
 ):
     body = GatedBody()
@@ -432,17 +432,18 @@ async def test_primary_context_validation_counts_toward_progress_timeout(
         providers = {"provider": provider, "fallback": fallback}
         executor = ProviderExecutor(
             AsyncMock(side_effect=lambda name, _api_key_number: providers[name]),
-            progress_timeout_seconds=0.05,
         )
         route = _routed_request if wire == "messages" else _routed_responses_request
         routed = route(_target("fallback", "fallback-model"))
         stream = getattr(executor, f"stream_{wire}")(
-            routed, raw_log_payload=dict, request_id="context-timeout"
+            routed, raw_log_payload=dict, request_id="context-cancel"
         )
         async with asyncio.timeout(2):
-            with pytest.raises(ExecutionFailure) as error:
-                await anext(stream)
-        assert error.value.kind is FailureKind.TIMEOUT
+            task = asyncio.ensure_future(anext(stream))
+            await body.started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
         assert body.started.is_set()
         assert body.close_count == 1
         assert fallback.stream_calls == []
@@ -822,7 +823,9 @@ async def test_cancelled_context_lookup_does_not_poison_other_requests(cancel_ow
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wire", ["messages", "responses"])
-async def test_request_timeout_while_waiting_for_cache_leaves_refresh_running(wire):
+async def test_request_cancellation_while_waiting_for_cache_leaves_refresh_running(
+    wire,
+):
     body = GatedBody()
     calls = 0
 
@@ -834,19 +837,20 @@ async def test_request_timeout_while_waiting_for_cache_leaves_refresh_running(wi
     async with provider_with_http(handler) as provider, asyncio.TaskGroup() as group:
         owner = group.create_task(provider._loaded_context_length())
         await asyncio.wait_for(body.started.wait(), 2)
-        executor = ProviderExecutor(
-            AsyncMock(return_value=provider), progress_timeout_seconds=0.05
-        )
+        executor = ProviderExecutor(AsyncMock(return_value=provider))
         routed = (
             _routed_request() if wire == "messages" else _routed_responses_request()
         )
         stream = getattr(executor, f"stream_{wire}")(
-            routed, raw_log_payload=dict, request_id="cache-wait-timeout"
+            routed, raw_log_payload=dict, request_id="cache-wait-cancel"
         )
         async with asyncio.timeout(2):
-            with pytest.raises(ExecutionFailure) as error:
-                await anext(stream)
-        assert error.value.kind is FailureKind.TIMEOUT
+            task = asyncio.ensure_future(anext(stream))
+            await asyncio.sleep(0)
+            assert not task.done()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
         assert not owner.done()
         assert body.close_count == 0
         body.release.set()
@@ -909,7 +913,6 @@ async def test_context_rejection_before_first_event_allows_fallback(wire):
         providers = {"provider": provider, "fallback": fallback}
         executor = ProviderExecutor(
             AsyncMock(side_effect=lambda name, _api_key_number: providers[name]),
-            progress_timeout_seconds=2,
         )
         route = _routed_request if wire == "messages" else _routed_responses_request
         stream = getattr(executor, f"stream_{wire}")(

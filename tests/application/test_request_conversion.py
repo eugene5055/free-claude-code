@@ -50,7 +50,7 @@ async def test_executor_converts_chat_request_once(wire):
                 api_key="test", base_url="https://provider.invalid/v1"
             ),
             profile=OpenAIChatProfile(
-                OpenAIChatRequestPolicy("TEST", ReasoningReplayMode.DISABLED),
+                OpenAIChatRequestPolicy("TEST", ReasoningReplayMode.REASONING_CONTENT),
                 NO_REASONING,
             ),
             admission=immediate_admission(),
@@ -58,7 +58,6 @@ async def test_executor_converts_chat_request_once(wire):
         )
         executor = ProviderExecutor(
             AsyncMock(side_effect=lambda _, _api_key_number: provider),
-            progress_timeout_seconds=60,
         )
         builder_name = (
             "_build_request_body"
@@ -105,7 +104,6 @@ async def test_executor_converts_selected_opencode_route_once(wire, egress, warm
         with patch.object(transport, name, wraps=getattr(transport, name)) as build:
             executor = ProviderExecutor(
                 AsyncMock(side_effect=lambda _, _api_key_number: provider),
-                progress_timeout_seconds=60,
             )
             stream = getattr(executor, f"stream_{wire}")(
                 routed, raw_log_payload=dict, request_id="opencode-conversion-once"
@@ -145,7 +143,6 @@ async def test_executor_converts_subscription_request_once(wire):
         ) as build:
             executor = ProviderExecutor(
                 AsyncMock(side_effect=lambda _, _api_key_number: provider),
-                progress_timeout_seconds=60,
             )
             stream = getattr(executor, f"stream_{wire}")(
                 routed, raw_log_payload=dict, request_id="subscription-conversion-once"

@@ -1,7 +1,6 @@
 """Provider execution shared by inbound API adapters."""
 
 import asyncio
-import math
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -71,7 +70,6 @@ class ProviderExecutor:
         self,
         provider_resolver: ProviderResolver,
         *,
-        progress_timeout_seconds: float,
         token_counter: TokenCounter = get_token_count,
         responses_token_counter: ResponsesTokenCounter = estimate_responses_input_tokens,
         generation_id: int | None = None,
@@ -79,8 +77,6 @@ class ProviderExecutor:
         request_headers: Mapping[str, str] | None = None,
         model_info_lookup: ModelInfoLookup | None = None,
     ) -> None:
-        if not math.isfinite(progress_timeout_seconds) or progress_timeout_seconds <= 0:
-            raise ValueError("progress_timeout_seconds must be finite and positive")
         self._provider_resolver = provider_resolver
         self._model_info_lookup = model_info_lookup or (lambda _provider, _model: None)
         self._token_counter = token_counter
@@ -88,32 +84,6 @@ class ProviderExecutor:
         self._generation_id = generation_id
         self._log_raw_payloads = log_raw_payloads
         self._request_headers = MappingProxyType(dict(request_headers or {}))
-        self._progress_timeout_seconds = float(progress_timeout_seconds)
-
-    def _progress_timeout_failure(
-        self,
-        *,
-        request_id: str,
-        provider_id: str,
-    ) -> ExecutionFailure:
-        trace_event(
-            stage="execution",
-            event="free_claude_code.provider.progress_timeout",
-            source="application",
-            request_id=request_id,
-            provider_id=provider_id,
-            timeout_seconds=self._progress_timeout_seconds,
-        )
-        timeout_text = f"{self._progress_timeout_seconds:g}"
-        return ExecutionFailure(
-            kind=FailureKind.TIMEOUT,
-            status_code=504,
-            message=(
-                f"Provider execution made no progress for {timeout_text} seconds.\n\n"
-                f"Request ID: {request_id}"
-            ),
-            retryable=False,
-        )
 
     def _trace_fallback_started(
         self,
@@ -505,8 +475,6 @@ class ProviderExecutor:
 
         async def provider_body() -> AsyncIterator[str]:
             nonlocal spare
-            loop = asyncio.get_running_loop()
-            progress_deadline = loop.time() + self._progress_timeout_seconds
             delivery = current_stream_delivery()
             continuation: ContinuationSeed | None = None
             configured_failure: ExecutionFailure | None = None
@@ -518,7 +486,6 @@ class ProviderExecutor:
                 candidate_committed = False
                 candidate_failure: ExecutionFailure | None = None
                 try:
-                    opening_started = monotonic()
                     try:
                         provider_stream = await open_candidate(
                             index, candidate, continuation
@@ -536,45 +503,18 @@ class ProviderExecutor:
                             message=f"Automatic fallback unavailable: {type(error).__name__}",
                             retryable=True,
                         )
-                    finally:
-                        # Initialization has its own request budget. Upstream progress
-                        # time is not spent waiting for a provider's startup task.
-                        progress_deadline += monotonic() - opening_started
 
                     if provider_stream is None and candidate_failure is None:
                         raise TypeError(
                             "provider stream method must return an async iterator"
                         )
                     while provider_stream is not None:
-                        if loop.time() >= progress_deadline:
-                            raise self._progress_timeout_failure(
-                                request_id=request_id,
-                                provider_id=target.provider_id,
-                            )
-                        progress_timeout = asyncio.timeout_at(progress_deadline)
-                        read_failure: ExecutionFailure | None = None
                         try:
-                            async with progress_timeout:
-                                try:
-                                    chunk = await anext(provider_stream)
-                                except ExecutionFailure as failure:
-                                    read_failure = failure
+                            chunk = await anext(provider_stream)
                         except StopAsyncIteration:
                             break
-                        except TimeoutError as exc:
-                            if not progress_timeout.expired():
-                                raise
-                            raise self._progress_timeout_failure(
-                                request_id=request_id,
-                                provider_id=target.provider_id,
-                            ) from exc
-                        if progress_timeout.expired():
-                            raise self._progress_timeout_failure(
-                                request_id=request_id,
-                                provider_id=target.provider_id,
-                            )
-                        if read_failure is not None:
-                            candidate_failure = read_failure
+                        except ExecutionFailure as failure:
+                            candidate_failure = failure
                             break
                         if not chunk:
                             await asyncio.sleep(0)
@@ -593,29 +533,16 @@ class ProviderExecutor:
                                     candidate_count=len(candidates),
                                 )
                         yield chunk
-                        progress_deadline = loop.time() + self._progress_timeout_seconds
                 finally:
                     if provider_stream is not None:
                         active_error = sys.exception()
                         preserved_error = active_error or candidate_failure
-                        cleanup_timeout = asyncio.timeout_at(
-                            progress_deadline if active_error is None else None
+                        await close_stream_input(
+                            provider_stream,
+                            owner="provider_executor",
+                            source="api",
+                            preserved_error=preserved_error,
                         )
-                        try:
-                            async with cleanup_timeout:
-                                await close_stream_input(
-                                    provider_stream,
-                                    owner="provider_executor",
-                                    source="api",
-                                    preserved_error=preserved_error,
-                                )
-                        except TimeoutError as exc:
-                            if not cleanup_timeout.expired():
-                                raise
-                            raise self._progress_timeout_failure(
-                                request_id=request_id,
-                                provider_id=target.provider_id,
-                            ) from exc
 
                 if candidate_failure is None:
                     record_outcome(

@@ -1,5 +1,4 @@
 import json
-import math
 
 import pytest
 from fastapi.testclient import TestClient
@@ -331,7 +330,7 @@ def test_direct_model_views_exclude_claude_aliases_and_duplicate_variants():
             "xhigh",
             "max",
         ],
-        "inferenceIdleTimeoutSecs": 660,
+        "inferenceIdleTimeoutSecs": 2_147_483,
     }
     plain = responses["data"][1]
     assert plain["supportsReasoningEffort"] is False
@@ -444,7 +443,7 @@ def test_muse_model_catalog_marks_every_routable_model_visible():
         metadata = row["metadata"]["muse-code"]
         assert metadata["is_hidden"] is False
         assert metadata["name"] == row["display_name"]
-        assert metadata["limit"] == {"context": 200000}
+        assert metadata["limit"] == {"context": 200000, "output": 81920}
         original = {key: value for key, value in row.items() if key != "metadata"}
         assert original in responses.json()["data"]
     assert [row["id"] for row in muse.json()["data"]] == [
@@ -487,41 +486,55 @@ def test_muse_catalog_uses_native_metadata_for_known_limits_and_reasoning():
         "name": "open_router/plain-model (no thinking)",
         "is_hidden": False,
         "reasoning": False,
-        "limit": {"context": 65536},
+        "limit": {"context": 65536, "output": 65536},
     }
     assert rows["deepseek/deepseek-chat"] == {
         "name": "deepseek/deepseek-chat",
         "is_hidden": False,
-        "limit": {"context": 200000},
+        "limit": {"context": 200000, "output": 81920},
     }
 
 
-def test_responses_model_view_rounds_timeout_up_before_margin():
-    app = create_test_app(
-        _settings().model_copy(update={"provider_progress_timeout": 1.1})
+@pytest.mark.parametrize(
+    ("context_tokens", "output_tokens", "expected_context", "expected_output"),
+    [
+        (None, None, 200000, 81920),
+        (131072, 8192, 131072, 8192),
+        (65536, None, 65536, 65536),
+        (None, 4096, 200000, 4096),
+        (65536, 49152, 65536, 49152),
+    ],
+)
+def test_muse_limits_are_complete_without_changing_reported_capabilities(
+    context_tokens, output_tokens, expected_context, expected_output
+):
+    from free_claude_code.application.model_catalog import read_model_catalog
+
+    app = create_test_app(_settings(model_opus=None, model_haiku=None))
+    manager = provider_manager_for_app(app)
+    manager.cache_model_infos(
+        "deepseek",
+        {
+            ProviderModelInfo(
+                "deepseek-chat",
+                context_window_tokens=context_tokens,
+                max_output_tokens=output_tokens,
+            )
+        },
     )
+    before = read_model_catalog(manager)
+    client = TestClient(app)
+    response_row = client.get("/v1/models?view=responses").json()["data"][0]
+    muse_row = client.get("/muse-code/models").json()["data"][0]
 
-    response = TestClient(app).get("/v1/models?view=responses")
-
-    assert response.status_code == 200
-    assert {row["inferenceIdleTimeoutSecs"] for row in response.json()["data"]} == {62}
-
-
-def test_responses_model_view_timeout_fits_unsigned_range():
-    largest_accepted_timeout = math.nextafter(float(1 << 64), 0.0)
-    app = create_test_app(
-        _settings().model_copy(
-            update={"provider_progress_timeout": largest_accepted_timeout}
-        )
-    )
-
-    response = TestClient(app).get("/v1/models?view=responses")
-
-    assert response.status_code == 200
-    assert all(
-        row["inferenceIdleTimeoutSecs"] <= (1 << 64) - 1
-        for row in response.json()["data"]
-    )
+    assert muse_row.pop("metadata")["muse-code"]["limit"] == {
+        "context": expected_context,
+        "output": expected_output,
+    }
+    assert muse_row == response_row
+    assert ("maxCompletionTokens" in response_row) is (output_tokens is not None)
+    assert read_model_catalog(manager) == before
+    assert before.models[0].max_output_tokens == output_tokens
 
 
 def test_unknown_model_view_is_rejected():

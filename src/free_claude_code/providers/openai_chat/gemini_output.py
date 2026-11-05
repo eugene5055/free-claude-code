@@ -9,7 +9,11 @@ from free_claude_code.core.gemini.response import (
     conversion_failure,
     function_arguments,
 )
-from free_claude_code.core.history_replay import ReplayRecord, decode_replay, is_replay
+from free_claude_code.core.history_replay import (
+    ReplayRecord,
+    decode_replay,
+    is_replay,
+)
 from free_claude_code.core.json_types import JsonObject
 
 from .stream_output import ChatStreamOutput, ChatStreamUsage, ChatToolState
@@ -33,9 +37,21 @@ class GeminiChatStreamOutput(ChatStreamOutput):
         )
         self._tool_names = tool_names
 
-    def capture_reasoning_record(self, native: JsonObject) -> bool:
+    def capture_reasoning_record(
+        self,
+        native: JsonObject,
+        *,
+        replay_owner: int | None = None,
+        completed: bool = True,
+    ) -> bool:
+        if not completed:
+            if replay_owner is not None:
+                self._gemini.discard(replay_owner)
+            return True
         assert self.replay_origin is not None
-        self._gemini.capture(ReplayRecord(self.replay_origin, deepcopy(native)))
+        self._gemini.capture(
+            ReplayRecord(self.replay_origin, deepcopy(native)), source=replay_owner
+        )
         return True
 
     def _start_events(self) -> list[str]:
@@ -45,9 +61,16 @@ class GeminiChatStreamOutput(ChatStreamOutput):
         return []
 
     def _emit_reasoning_delta(
-        self, content: str, *, summary: bool = False, source: int = 0
+        self,
+        content: str,
+        *,
+        summary: bool = False,
+        source: int = 0,
+        replay_owner: int | None = None,
     ) -> str:
-        return "".join(self._gemini.part({"text": content, "thought": True}))
+        return "".join(
+            self._gemini.part({"text": content, "thought": True}, source=replay_owner)
+        )
 
     def _emit_opaque_reasoning(self, data: str) -> list[str]:
         if is_replay(data):
@@ -89,7 +112,7 @@ class GeminiChatStreamOutput(ChatStreamOutput):
         arguments = function_arguments(state.content)
         if state.extra_content:
             assert self.replay_origin is not None
-            self._gemini.calls.append(
+            self._gemini.capture_call(
                 CallReplay(
                     self.replay_origin, state.tool_id, deepcopy(state.extra_content)
                 )

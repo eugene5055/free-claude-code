@@ -9,7 +9,6 @@ from free_claude_code.application.errors import InvalidRequestError
 from free_claude_code.config.constants import ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS
 from free_claude_code.core.anthropic import ReasoningReplayMode
 from free_claude_code.core.anthropic.models import MessagesRequest
-from free_claude_code.core.history_replay import HistoryScope
 from free_claude_code.core.model_capabilities import ModelInputModality
 from free_claude_code.core.reasoning import ReasoningEffort, ReasoningPolicy
 from free_claude_code.providers.model_listing import (
@@ -184,7 +183,6 @@ class OpenAIChatProfile:
         None
     )
     structured_reasoning_details: bool = False
-    history_scope: HistoryScope = HistoryScope.TOOL_CONTINUATION
     user_agent: str | None = None
 
     @property
@@ -333,7 +331,7 @@ def _zai_profile(provider_name: str) -> OpenAIChatProfile:
 
 OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
     "cline_pass": OpenAIChatProfile(
-        _policy("CLINE_PASS", ReasoningReplayMode.DISABLED),
+        _policy("CLINE_PASS", ReasoningReplayMode.REASONING),
         NO_REASONING,
         model_listing=OpenAIModelListing(
             path="/ai/cline/recommended-models",
@@ -449,7 +447,7 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
     "chutes": OpenAIChatProfile(
         _policy(
             "CHUTES",
-            ReasoningReplayMode.DISABLED,
+            ReasoningReplayMode.REASONING_CONTENT,
             default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
         ),
         NO_REASONING,
@@ -501,7 +499,7 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
     "agnes": OpenAIChatProfile(
         _policy(
             "AGNES",
-            ReasoningReplayMode.THINK_TAGS,
+            ReasoningReplayMode.REASONING_CONTENT,
             include_extra_body=True,
             extra_body_validator=validate_extra_body_does_not_override_reasoning_fields,
             default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
@@ -534,7 +532,7 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
     "wandb": OpenAIChatProfile(
         _policy(
             "WANDB",
-            ReasoningReplayMode.DISABLED,
+            ReasoningReplayMode.REASONING,
             include_extra_body=True,
             extra_body_validator=validate_extra_body_does_not_override_reasoning_fields,
             default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
@@ -546,7 +544,7 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
     "azure_openai": OpenAIChatProfile(
         _policy(
             "AZURE_OPENAI",
-            ReasoningReplayMode.THINK_TAGS,
+            ReasoningReplayMode.REASONING_CONTENT,
             max_tokens_field="max_completion_tokens",
         ),
         NamedEffortReasoning(
@@ -557,7 +555,7 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
         model_ids_are_routable=False,
     ),
     "mistral_codestral": OpenAIChatProfile(
-        _policy("CODESTRAL", ReasoningReplayMode.THINK_TAGS),
+        _policy("CODESTRAL", ReasoningReplayMode.REASONING_CONTENT),
         NO_REASONING,
         model_listing=OpenAIModelListing(
             input_modality_boolean_paths=(
@@ -573,7 +571,7 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
     "vercel": OpenAIChatProfile(
         _policy(
             "VERCEL",
-            ReasoningReplayMode.THINK_TAGS,
+            ReasoningReplayMode.REASONING_CONTENT,
             include_extra_body=True,
             extra_body_validator=validate_extra_body_does_not_override_reasoning_fields,
         ),
@@ -586,14 +584,14 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
         ),
     ),
     "bedrock": OpenAIChatProfile(
-        _policy("BEDROCK", ReasoningReplayMode.THINK_TAGS),
+        _policy("BEDROCK", ReasoningReplayMode.REASONING_CONTENT),
         NO_REASONING,
         normalize_base_url=True,
     ),
     "huggingface": OpenAIChatProfile(
         _policy(
             "HUGGINGFACE",
-            ReasoningReplayMode.DISABLED,
+            ReasoningReplayMode.REASONING_CONTENT,
             include_extra_body=True,
             extra_body_validator=validate_extra_body_does_not_override_reasoning_fields,
         ),
@@ -684,7 +682,7 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
     "cerebras": OpenAIChatProfile(
         _policy(
             "CEREBRAS",
-            ReasoningReplayMode.THINK_TAGS,
+            ReasoningReplayMode.REASONING,
             include_extra_body=True,
             extra_body_validator=validate_extra_body_does_not_override_reasoning_fields,
             max_tokens_field="max_completion_tokens",
@@ -751,7 +749,7 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
     "nararoute": OpenAIChatProfile(
         _policy(
             "NARAROUTE",
-            ReasoningReplayMode.DISABLED,
+            ReasoningReplayMode.REASONING_CONTENT,
             default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
         ),
         NamedEffortReasoning(
@@ -795,7 +793,7 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
     "lightning": OpenAIChatProfile(
         _policy(
             "LIGHTNING",
-            ReasoningReplayMode.DISABLED,
+            ReasoningReplayMode.REASONING_CONTENT,
             default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
         ),
         NamedEffortReasoning(
@@ -930,14 +928,14 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
     "tokenrouter": OpenAIChatProfile(
         _policy(
             "TOKENROUTER",
-            ReasoningReplayMode.DISABLED,
+            ReasoningReplayMode.REASONING_CONTENT,
         ),
         NO_REASONING,
     ),
     "llamacpp": OpenAIChatProfile(
         _policy(
             "LLAMACPP",
-            ReasoningReplayMode.THINK_TAGS,
+            ReasoningReplayMode.REASONING_CONTENT,
             default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
         ),
         LLAMACPP_REASONING,

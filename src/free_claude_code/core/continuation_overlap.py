@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import simplejson
 
@@ -15,7 +15,7 @@ type PartKey = tuple[int | str, int]
 
 @dataclass(slots=True)
 class _Part:
-    order: tuple[int, int]
+    order: tuple[int, ...]
     text: str = ""
     seen: int = 0
     closed: bool = False
@@ -26,7 +26,7 @@ class _Part:
 @dataclass(slots=True)
 class _Text:
     key: PartKey
-    order: tuple[int, int]
+    order: tuple[int, ...]
     value: dict[str, Any]
     field: str
     delta: bool = False
@@ -43,31 +43,35 @@ class _Frame:
 class ContinuationOverlap:
     """Own unpublished replay evidence, never the public response transcript."""
 
-    def __init__(self, expected: str) -> None:
+    def __init__(
+        self, expected: str, *, channel: Literal["text", "thinking"] = "text"
+    ) -> None:
+        self._channel = channel
         self._expected = expected
         self._pending = bool(expected)
         self._parts: dict[PartKey, _Part] = {}
         self._ids: dict[int, str] = {}
         self._frames: list[_Frame] = []
         self._frame_bytes = 0
-        self._frontier: tuple[int, int] | None = None
+        self._frontier: tuple[int, ...] | None = None
 
     def feed(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         data = deepcopy(payload)
         block = data.get("content_block", {})
+        field = "thinking" if self._channel == "thinking" else "text"
         if (
             data.get("type") == "content_block_start"
-            and block.get("type") == "text"
-            and block.get("text")
+            and block.get("type") == field
+            and block.get(field)
         ):
-            text, block["text"] = block["text"], ""
+            text, block[field] = block[field], ""
             return [
                 *self._feed(data),
                 *self._feed(
                     {
                         "type": "content_block_delta",
                         "index": data["index"],
-                        "delta": {"type": "text_delta", "text": text},
+                        "delta": {"type": f"{field}_delta", field: text},
                     }
                 ),
             ]
@@ -135,7 +139,7 @@ class ContinuationOverlap:
             candidate += part.text[: len(self._expected) + 1 - len(candidate)]
             if not part.closed or len(candidate) > len(self._expected):
                 break
-        if terminal or candidate not in self._expected:
+        if terminal or candidate == self._expected or candidate not in self._expected:
             self._resolve(candidate, candidates)
             frames, self._frames = self._frames, []
             self._frame_bytes = 0
@@ -164,22 +168,24 @@ class ContinuationOverlap:
             return [
                 _Text(("gemini", 0), (0, 0), part, "text", delta=True)
                 for part in gemini_parts(data)
-                if "text" in part and not part.get("thought")
+                if "text" in part
+                and bool(part.get("thought")) == (self._channel == "thinking")
             ]
         kind = data.get("type", "")
         index = data.get("index", 0)
+        field = "thinking" if self._channel == "thinking" else "text"
         if kind == "content_block_start":
             block = data.get("content_block", {})
             return (
-                [_Text((index, 0), (index, 0), block, "text")]
-                if block.get("type") == "text"
+                [_Text((index, 0), (index, 0), block, field)]
+                if block.get("type") == field
                 else []
             )
         if kind == "content_block_delta":
             delta = data.get("delta", {})
             return (
-                [_Text((index, 0), (index, 0), delta, "text", delta=True)]
-                if delta.get("type") == "text_delta"
+                [_Text((index, 0), (index, 0), delta, field, delta=True)]
+                if delta.get("type") == f"{field}_delta"
                 else []
             )
         if kind in {"response.completed", "response.incomplete"}:
@@ -189,40 +195,65 @@ class ContinuationOverlap:
             return texts
         item = data.get("item", {})
         if kind in {"response.output_item.added", "response.output_item.done"}:
-            if item.get("type") != "message":
+            if item.get("type") != (
+                "message" if self._channel == "text" else "reasoning"
+            ):
                 return []
             identity = self._identity(data, item)
             return self._item_texts(item, identity, data.get("output_index", 0))
+        summary = kind.startswith("response.reasoning_summary_")
+        text_event = (
+            "response.output_text"
+            if self._channel == "text"
+            else "response.reasoning_summary_text"
+            if summary
+            else "response.reasoning_text"
+        )
+        part_event = (
+            "response.reasoning_summary_part" if summary else "response.content_part"
+        )
+        if summary and self._channel == "text":
+            return []
         if kind not in {
-            "response.content_part.added",
-            "response.content_part.done",
-            "response.output_text.delta",
-            "response.output_text.done",
+            f"{text_event}.delta",
+            f"{text_event}.done",
+            f"{part_event}.added",
+            f"{part_event}.done",
         }:
             return []
-        position = data.get("content_index", 0)
-        key = (self._identity(data, {}), position)
-        order = (data.get("output_index", 0), position)
-        if kind in {"response.output_text.delta", "response.output_text.done"}:
+        position = data.get("summary_index" if summary else "content_index", 0)
+        key = (self._identity(data, {}), position * 2 + int(summary))
+        order = (data.get("output_index", 0), int(summary), position)
+        if kind in {f"{text_event}.delta", f"{text_event}.done"}:
             delta = kind.endswith(".delta")
             return [_Text(key, order, data, "delta" if delta else "text", delta=delta)]
         part = data.get("part", {})
-        return (
-            [_Text(key, order, part, "text")]
-            if part.get("type") == "output_text"
-            else []
+        expected = (
+            "output_text"
+            if self._channel == "text"
+            else "summary_text"
+            if summary
+            else "reasoning_text"
         )
+        return [_Text(key, order, part, "text")] if part.get("type") == expected else []
 
-    @staticmethod
     def _item_texts(
-        item: dict[str, Any], identity: int | str, index: int
+        self, item: dict[str, Any], identity: int | str, index: int
     ) -> list[_Text]:
-        if item.get("type") != "message":
+        if item.get("type") != ("message" if self._channel == "text" else "reasoning"):
             return []
+        fields = (
+            (("content", "output_text"),)
+            if self._channel == "text"
+            else (("content", "reasoning_text"), ("summary", "summary_text"))
+        )
         return [
-            _Text((identity, position), (index, position), part, "text")
-            for position, part in enumerate(item.get("content", []))
-            if part.get("type") == "output_text"
+            _Text(
+                (identity, position * 2 + rank), (index, rank, position), part, "text"
+            )
+            for rank, (field, kind) in enumerate(fields)
+            for position, part in enumerate(item.get(field) or [])
+            if part.get("type") == kind
         ]
 
     def _close_parts(self, data: dict[str, Any], *, terminal: bool) -> None:
@@ -230,7 +261,8 @@ class ContinuationOverlap:
         identity = (
             self._identity(data, data.get("item", {}))
             if kind == "response.output_item.done"
-            and data.get("item", {}).get("type") == "message"
+            and data.get("item", {}).get("type")
+            == ("message" if self._channel == "text" else "reasoning")
             else data.get("index")
             if kind == "content_block_stop"
             else None
@@ -260,6 +292,8 @@ class ContinuationOverlap:
         }
 
     def _overlap_size(self, candidate: str) -> int:
+        if self._channel == "thinking" and self._expected.startswith(candidate):
+            return len(candidate)
         for size in range(min(len(self._expected), len(candidate)), 0, -1):
             if self._expected.endswith(candidate[:size]):
                 return size
@@ -269,7 +303,7 @@ class ContinuationOverlap:
         value = text.value.get(text.field, "")
         part = self._parts.get(text.key)
         if part is None:
-            if value and self._frontier is not None and text.order < self._frontier:
+            if value and self._precedes_prefix(text):
                 self._inconsistent()
             return
         text.part = part
@@ -285,11 +319,42 @@ class ContinuationOverlap:
                 self._inconsistent()
             part.seen = max(part.seen, len(value))
 
+    def _precedes_prefix(self, text: _Text) -> bool:
+        if len(text.order) == 3:
+            # Responses arrays advance independently within the same item.
+            keys = [key for key in self._parts if key[0] == text.key[0]]
+            if keys:
+                if text.key[0] != next(reversed(self._parts))[0]:
+                    return True
+                return any(
+                    key[1] % 2 == text.key[1] % 2 and text.key[1] < key[1]
+                    for key in keys
+                )
+        return self._frontier is not None and text.order < self._frontier
+
     def _check_terminal_order(self, texts: list[_Text]) -> None:
         keys = list(self._parts)
         observed = [text.key for text in texts if text.value.get(text.field)]
-        if observed[: len(keys)] != keys:
+        items = list(dict.fromkeys(key[0] for key in keys))
+        observed_items = list(dict.fromkeys(key[0] for key in observed))
+        if observed_items[: len(items)] != items:
             self._inconsistent()
+        for identity in items[:-1]:
+            if [key for key in observed if key[0] == identity] != [
+                key for key in keys if key[0] == identity
+            ]:
+                self._inconsistent()
+        # A final snapshot groups arrays rather than preserving event arrival
+        # order. Require each array's matched prefix, allowing its later parts.
+        for identity, array in {(key[0], key[1] % 2) for key in keys}:
+            expected = [
+                key for key in keys if key[0] == identity and key[1] % 2 == array
+            ]
+            actual = [
+                key for key in observed if key[0] == identity and key[1] % 2 == array
+            ]
+            if actual[: len(expected)] != expected:
+                self._inconsistent()
         # Terminal positions may have shifted when the tool gate removed an item.
         for text in texts:
             if text.key not in self._parts:
@@ -353,6 +418,6 @@ class ContinuationOverlap:
         raise ExecutionFailure(
             kind=FailureKind.UPSTREAM,
             status_code=502,
-            message="The continuation changed an already observed answer prefix.",
+            message="The continuation changed an already observed output prefix.",
             retryable=False,
         )

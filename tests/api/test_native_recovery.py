@@ -18,6 +18,7 @@ from free_claude_code.providers.admission import (
 from tests.api.support import create_test_app, provider_manager_for_app
 from tests.api.test_native_token_count import count_body
 from tests.api.test_request_lifetime import _http_scope
+from tests.providers.support import without_empty_reasoning
 from tests.providers.test_anthropic_messages_transport import Wire, _events, _sse
 from tests.providers.test_anthropic_provider import native_body, provider
 
@@ -114,19 +115,21 @@ async def test_leading_ping_timeout_or_disconnect_releases_all_resources(disconn
         closed = False
 
         async def __aiter__(self):
-            for _ in range(100):
-                entered.set()
-                yield _sse({"type": "ping"})
-                await asyncio.sleep(0.005)
-            raise httpx.ReadError("No message started")
+            entered.set()
+            yield _sse({"type": "ping"})
+            if disconnect:
+                await asyncio.Event().wait()
+            raise httpx.ReadTimeout("No message started")
 
         async def aclose(self):
             self.closed = True
 
-    wire = Pings()
+    wires = []
 
     def handle(request):
         calls.append(request)
+        wire = Pings()
+        wires.append(wire)
         return httpx.Response(
             200, headers={"content-type": "text/event-stream"}, stream=wire
         )
@@ -146,7 +149,6 @@ async def test_leading_ping_timeout_or_disconnect_releases_all_resources(disconn
         Settings(
             MODEL="anthropic/primary",
             MODEL_FALLBACKS=[ModelFallback(model="anthropic/backup")],
-            provider_progress_timeout=0.05,
         ),
         providers={"anthropic": p},
     )
@@ -171,7 +173,7 @@ async def test_leading_ping_timeout_or_disconnect_releases_all_resources(disconn
                 sent.append(message)
 
             await asyncio.wait_for(app(scope, receive, send), 2)
-            assert sent == []
+            assert without_empty_reasoning(sent) == []
         else:
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app), base_url="http://test"
@@ -179,11 +181,13 @@ async def test_leading_ping_timeout_or_disconnect_releases_all_resources(disconn
                 response = await asyncio.wait_for(
                     client.post("/v1/messages", json=native_body(True)), 2
                 )
-            assert response.status_code == 504, response.text
-            assert response.json()["error"]["type"] == "timeout_error"
+            assert response.status_code == 502, response.text
+            assert response.json()["error"]["type"] == "api_error"
+            assert "No message started" in response.json()["error"]["message"]
             assert response.headers["x-should-retry"] == "false"
-        assert len(calls) == 1
-        assert wire.closed
+        assert len(calls) == (1 if disconnect else 4)
+        assert len(wires) == len(calls)
+        assert all(wire.closed for wire in wires)
         assert manager._current.active_leases == 0
         # With concurrency one, a new operation can finish only if the old permit was released.
         execution = p._admission.start_execution()
@@ -276,7 +280,7 @@ def test_count_generate_and_continue_native_tool_history_with_recovery():
     assert continued.status_code == 200, continued.text
     assert continued.json()["content"] == [result_block]
     assert continued.json()["model"] == body["model"]
-    assert sent == [
+    assert without_empty_reasoning(sent) == [
         {**body, "model": "primary"},
         {**body, "model": "primary"},
         {**continuation, "model": "primary"},

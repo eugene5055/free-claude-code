@@ -17,6 +17,7 @@ from free_claude_code.core.anthropic.stream_contracts import (
     text_content,
     thinking_content,
 )
+from free_claude_code.core.history_replay import decode_replay
 from free_claude_code.core.json_types import JsonObject, JsonValue
 from free_claude_code.core.reasoning import ReasoningPolicy
 from free_claude_code.providers.model_listing import ModelListResponseError
@@ -240,7 +241,7 @@ def test_build_request_body_adds_no_undocumented_reasoning_control_or_default_ca
         assert field not in body
 
 
-def test_build_request_body_replays_only_opaque_reasoning_details(
+def test_build_request_body_preserves_readable_and_native_reasoning(
     cline_pass_provider: OpenAIChatProvider,
 ) -> None:
     detail: JsonObject = {
@@ -273,9 +274,9 @@ def test_build_request_body_replays_only_opaque_reasoning_details(
         message for message in body["messages"] if message["role"] == "assistant"
     )
 
-    assert assistant["content"] == "Need a tool.\n\nI will inspect it."
+    assert assistant["content"] == "I will inspect it."
     assert assistant["reasoning_details"] == [detail]
-    assert "reasoning" not in assistant
+    assert assistant["reasoning"] == "Need a tool."
     assert "reasoning_content" not in assistant
     assert (
         cline_pass_provider._profile.reasoning_delta(
@@ -330,7 +331,9 @@ async def test_stream_uses_upstream_sse_and_preserves_reasoning_details(
         for event in events
         if event.data.get("delta", {}).get("type") == "signature_delta"
     ]
-    assert records == [detail["signature"]]
+    assert [decode_replay(record).native for record in records] == [
+        {"reasoning_details": [detail]}
+    ]
     assert stream.closed
 
 

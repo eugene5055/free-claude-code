@@ -44,7 +44,6 @@ RUNTIME_FIELDS = (
     "provider_rate_window",
     "provider_max_concurrency",
     "provider_admission_limits",
-    "provider_progress_timeout",
     "http_read_timeout",
     "http_write_timeout",
     "http_connect_timeout",

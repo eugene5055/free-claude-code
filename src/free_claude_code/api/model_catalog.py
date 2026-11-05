@@ -1,6 +1,5 @@
 """Model-list response construction for FCC clients."""
 
-import math
 from enum import StrEnum
 from typing import Literal
 
@@ -14,6 +13,7 @@ from free_claude_code.application.model_catalog import (
 )
 from free_claude_code.application.ports import ModelCatalogPort
 from free_claude_code.application.routing import supports_native_messages
+from free_claude_code.config.constants import ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.gateway_model_ids import (
     desktop_model_id,
@@ -23,7 +23,8 @@ from free_claude_code.core.gateway_model_ids import (
 from free_claude_code.core.model_capabilities import ModelInputModality
 
 DISCOVERED_MODEL_CREATED_AT = "1970-01-01T00:00:00Z"
-_INFERENCE_IDLE_TIMEOUT_MARGIN_SECONDS = 60
+# Keep clients waiting while FCC owns transport retries and cancellation.
+_INFERENCE_IDLE_TIMEOUT_SECONDS = 2_147_483
 _REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
@@ -37,8 +38,8 @@ class ModelCatalogView(StrEnum):
 
 
 class MuseModelLimits(BaseModel):
-    context: int | None = None
-    output: int | None = None
+    context: int
+    output: int
 
 
 class MuseModelMetadata(BaseModel):
@@ -47,7 +48,7 @@ class MuseModelMetadata(BaseModel):
     name: str
     is_hidden: Literal[False] = False
     reasoning: bool | None = None
-    limit: MuseModelLimits | None = None
+    limit: MuseModelLimits
 
 
 class MuseMetadataEnvelope(BaseModel):
@@ -161,7 +162,7 @@ def build_models_list_response(
         return _build_claude_models_response(
             catalog, desktop=view is ModelCatalogView.CLAUDE_DESKTOP
         )
-    return _build_direct_models_response(settings, catalog, view=view)
+    return _build_direct_models_response(catalog, view=view)
 
 
 def build_muse_models_list_response(
@@ -172,20 +173,17 @@ def build_muse_models_list_response(
         settings, runtime, view=ModelCatalogView.RESPONSES
     )
     for model in catalog.data:
-        limits = (
-            MuseModelLimits(
-                context=model.context_window_tokens,
-                output=model.max_output_tokens,
-            )
-            if model.context_window_tokens is not None
-            or model.max_output_tokens is not None
-            else None
-        )
+        context = model.context_window_tokens
+        assert context is not None  # The Responses view resolves client context.
+        # Muse discards all native metadata if either limit is missing.
+        output = model.max_output_tokens
+        if output is None:
+            output = min(ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS, context)
         model.metadata = MuseMetadataEnvelope(
             muse_code=MuseModelMetadata(
                 name=model.display_name,
                 reasoning=model.supports_reasoning,
-                limit=limits,
+                limit=MuseModelLimits(context=context, output=output),
             )
         )
     return catalog
@@ -274,16 +272,13 @@ def _build_grouped_claude_models_response(
 
 
 def _build_direct_models_response(
-    settings: Settings,
     catalog: ModelCatalog,
     *,
     view: ModelCatalogView,
 ) -> ModelsListResponse:
     models: list[ModelResponse] = []
     timeout_seconds = (
-        _responses_inference_idle_timeout_seconds(settings.provider_progress_timeout)
-        if view is ModelCatalogView.RESPONSES
-        else None
+        _INFERENCE_IDLE_TIMEOUT_SECONDS if view is ModelCatalogView.RESPONSES else None
     )
 
     default_model_id = catalog.default_model_id
@@ -340,10 +335,6 @@ def _serialize_input_modalities(
     if modalities is None:
         return None
     return tuple(modality for modality in ModelInputModality if modality in modalities)
-
-
-def _responses_inference_idle_timeout_seconds(provider_progress_timeout: float) -> int:
-    return math.ceil(provider_progress_timeout) + _INFERENCE_IDLE_TIMEOUT_MARGIN_SECONDS
 
 
 def _discovered_model_response(model_id: str, *, display_name: str) -> ModelResponse:

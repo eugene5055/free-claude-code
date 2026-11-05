@@ -7,9 +7,14 @@ from hashlib import sha256
 from typing import Any
 
 from ..failures import ExecutionFailure, FailureKind
-from ..history_replay import ReplayRecord, readable_reasoning
+from ..history_replay import (
+    ReplayRecord,
+    encode_replay,
+    protected_reasoning,
+    readable_reasoning,
+)
 from ..json_types import JsonObject
-from ..stream_delivery import current_stream_delivery
+from ..stream_recovery import RECOVERY_RETENTION_BYTES
 from .errors import gemini_error_payload
 from .replay import CallReplay, ReplayBundle, encode_bundle
 
@@ -62,29 +67,68 @@ class GeminiOutput:
         self.calls: list[CallReplay] = []
         self.completed = False
         self._thought_digest = sha256()
-        self._has_thoughts = False
-        self._delivery = current_stream_delivery()
+        self._thought_length = 0
+        self._ranges: dict[int, list[tuple[int, int]]] = {}
+        self._record_sources: dict[int, int] = {}
+        self._record_sizes: dict[int, int] = {}
+        self._retained_bytes = 0
 
-    def capture(self, record: ReplayRecord) -> None:
-        self.records.append(record)
-        self._bind_replay()
+    def _retain(self, size: int) -> None:
+        self._retained_bytes += size
+        if self._retained_bytes > RECOVERY_RETENTION_BYTES:
+            raise conversion_failure(
+                "Protected reasoning exceeded the continuation retention limit."
+            )
 
-    def replace_records(self, records: list[ReplayRecord]) -> None:
-        self.records = records
-        self._bind_replay()
+    def capture(self, record: ReplayRecord, *, source: int | None = None) -> None:
+        if source is not None and not readable_reasoning(record.native):
+            self.discard(source)
+        if not protected_reasoning(record.native):
+            if source is not None:
+                self.discard(source)
+            return
+        size = len(encode_replay(record).encode("utf-8"))
+        index = self._record_sources.get(source) if source is not None else None
+        if index is None:
+            index = len(self.records)
+            if source is not None:
+                self._record_sources[source] = index
+            self.records.append(record)
+        else:
+            self.records[index] = record
+        self._retain(size - self._record_sizes.get(index, 0))
+        self._record_sizes[index] = size
 
-    def _bind_replay(self) -> None:
-        if self._delivery is not None:
-            self._delivery.bind_replay_source(lambda: tuple(self.records))
+    def discard(self, source: int) -> None:
+        """Release provisional echo ownership for an unsigned or abandoned record."""
+        self._retain(-24 * len(self._ranges.pop(source, ())))
 
-    def _records(self) -> tuple[ReplayRecord, ...]:
-        if self._delivery is not None:
-            if self._delivery.replay_exhausted:
-                raise conversion_failure(
-                    "Completed reasoning exceeded the continuation retention limit."
+    def order_records(self, sources: list[int]) -> None:
+        """Publish source-ordered records with their echo references kept intact."""
+        order = [
+            self._record_sources[source]
+            for source in sources
+            if source in self._record_sources
+        ]
+        assert len(order) == len(self.records)
+        positions = {old: new for new, old in enumerate(order)}
+        self.records = [self.records[index] for index in order]
+        self._record_sources = {
+            source: positions[index] for source, index in self._record_sources.items()
+        }
+        self._record_sizes = {
+            positions[index]: size for index, size in self._record_sizes.items()
+        }
+
+    def capture_call(self, record: CallReplay) -> None:
+        self._retain(
+            len(
+                encode_bundle(
+                    ReplayBundle(self.response_id, calls=(record,), protected_echo=())
                 )
-            return self._delivery.committed_replay + tuple(self.records)
-        return tuple(self.records)
+            )
+        )
+        self.calls.append(record)
 
     def payload(self, candidate: JsonObject) -> JsonObject:
         return {
@@ -93,14 +137,22 @@ class GeminiOutput:
             "candidates": [{"index": 0, **candidate}],
         }
 
-    def part(self, part: JsonObject) -> list[str]:
+    def part(self, part: JsonObject, *, source: int | None = None) -> list[str]:
         if self.completed or (
             part.get("thought") is True and not self.include_thoughts
         ):
             return []
         if part.get("thought") is True and isinstance(text := part.get("text"), str):
             self._thought_digest.update(text.encode("utf-8"))
-            self._has_thoughts = True
+            start = self._thought_length
+            self._thought_length += len(text)
+            if source is not None and text:
+                spans = self._ranges.setdefault(source, [])
+                if spans and spans[-1][1] == start:
+                    spans[-1] = (spans[-1][0], self._thought_length)
+                else:
+                    self._retain(24)
+                    spans.append((start, self._thought_length))
         return [
             gemini_frame(self.payload({"content": {"role": "model", "parts": [part]}}))
         ]
@@ -109,11 +161,10 @@ class GeminiOutput:
         if self.completed:
             return []
         candidate: JsonObject = {"finishReason": reason}
-        if self._records() or self.calls:
-            bundle = self._bundle()
+        if self.records or self.calls:
             candidate["content"] = {
                 "role": "model",
-                "parts": [{"thoughtSignature": encode_bundle(bundle)}],
+                "parts": [{"thoughtSignature": self._encoded_bundle()}],
             }
         payload = self.payload(candidate)
         if usage:
@@ -123,23 +174,29 @@ class GeminiOutput:
 
     def handoff(self) -> list[str]:
         """Release completed source metadata before the public owner's tool handoff."""
-        if not (self._records() or self.calls) or self.completed:
+        if not (self.records or self.calls) or self.completed:
             return []
-        bundle = self._bundle()
-        return self.part({"thoughtSignature": encode_bundle(bundle)})
+        return self.part({"thoughtSignature": self._encoded_bundle()})
 
-    def _bundle(self) -> ReplayBundle:
-        records = self._records()
-        covered = sha256()
-        for record in records:
-            for text, _ in readable_reasoning(record.native):
-                covered.update(text.encode("utf-8"))
-        digest = self._thought_digest.hexdigest()
-        return ReplayBundle(
-            self.response_id,
-            records,
-            tuple(self.calls),
-            digest if self._has_thoughts and covered.hexdigest() == digest else None,
+    def _encoded_bundle(self) -> str:
+        spans = tuple(
+            sorted(
+                (
+                    (index, start, end)
+                    for source, index in self._record_sources.items()
+                    for start, end in self._ranges.get(source, ())
+                ),
+                key=lambda span: span[1],
+            )
+        )
+        return encode_bundle(
+            ReplayBundle(
+                self.response_id,
+                tuple(self.records),
+                tuple(self.calls),
+                self._thought_digest.hexdigest() if spans else None,
+                spans,
+            )
         )
 
     def failure(self, status_code: int, message: str) -> list[str]:

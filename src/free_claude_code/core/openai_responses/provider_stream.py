@@ -50,11 +50,6 @@ class _ReasoningState:
     parts: dict[tuple[str, int], str] = field(default_factory=dict)
     stopped: bool = False
 
-    def text(self, field_name: str) -> str:
-        return "".join(
-            text for (name, _), text in sorted(self.parts.items()) if name == field_name
-        )
-
 
 class ResponsesProviderStream:
     """Stateful one-way adapter for one upstream response."""
@@ -177,13 +172,11 @@ class ResponsesProviderStream:
                 for index, part in enumerate(parts)
                 if isinstance(part, dict) and isinstance(part.get("text"), str)
             ]
-            full_text = "".join(text for _, text in text_parts)
-            alternate = state.text("summary" if field_name == "content" else "content")
             for index, text in text_parts:
                 key = (field_name, index)
                 previous = state.parts.get(key, "")
                 state.parts[key] = text
-                if not text or full_text == alternate:
+                if not text:
                     continue
                 remaining = text.removeprefix(previous)
                 if remaining:
@@ -265,9 +258,13 @@ class ResponsesProviderStream:
             return events
         if item_type == "reasoning":
             encrypted = item.get("encrypted_content")
-            carrier = encode_replay(ReplayRecord(self._origin, cast(JsonObject, item)))
             events = self._item_readable(item, completed=True)
             state = self._reasoning[item_id]
+            carrier = (
+                encode_replay(ReplayRecord(self._origin, cast(JsonObject, item)))
+                if encrypted
+                else None
+            )
             if (
                 state.block_index is None
                 and isinstance(encrypted, str)
@@ -281,13 +278,12 @@ class ResponsesProviderStream:
             ):
                 events.extend(self._ensure_reasoning_started(state, completed=True))
             if state.block_index is not None:
-                events.append(
-                    self.ledger.content_block_delta(
-                        state.block_index,
-                        "signature_delta",
-                        carrier,
+                if carrier:
+                    events.append(
+                        self.ledger.content_block_delta(
+                            state.block_index, "signature_delta", carrier
+                        )
                     )
-                )
                 events.append(self.ledger.content_block_stop(state.block_index))
                 state.stopped = True
                 return events

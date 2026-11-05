@@ -25,12 +25,14 @@ from free_claude_code.core.anthropic.streaming import (
     ToolSchema,
     accept_tool_json_repair,
     continuation_suffix,
-    make_response_recovery_body,
-    make_text_recovery_body,
     make_tool_repair_body,
     map_stop_reason,
     parse_complete_tool_input,
     tool_schemas_by_name,
+)
+from free_claude_code.core.continuation_request import (
+    make_response_recovery_body,
+    make_text_recovery_body,
 )
 from free_claude_code.core.diagnostics import (
     exception_cause_types,
@@ -40,7 +42,7 @@ from free_claude_code.core.failures import ExecutionFailure, FailureKind
 from free_claude_code.core.gemini import GeminiConversionError, GeminiRequest
 from free_claude_code.core.gemini.replay import CallReplay, apply_call_replay
 from free_claude_code.core.gemini.request import build_gemini_chat_request
-from free_claude_code.core.history_replay import ReplayOrigin, prepare_history
+from free_claude_code.core.history_replay import ReplayOrigin
 from free_claude_code.core.json_types import JsonObject
 from free_claude_code.core.openai_responses import (
     OpenAIResponsesRequest,
@@ -81,6 +83,10 @@ from free_claude_code.providers.failure_policy import (
     provider_authentication_status,
     underlying_provider_error,
 )
+from free_claude_code.providers.history_negotiation import (
+    HistoryModeCache,
+    resolve_history_overrides,
+)
 from free_claude_code.providers.history_replay import (
     replay_origin,
     validate_history,
@@ -117,6 +123,7 @@ from .request_policy import (
     apply_openai_chat_body_policy,
 )
 from .stream_output import (
+    ORDINARY_REASONING_SOURCE,
     AnthropicChatStreamOutput,
     ChatStreamOutput,
     ChatStreamUsage,
@@ -336,8 +343,12 @@ class _OpenAIChatStreamAssembler:
                 if part.type == ContentType.THINKING:
                     if not self._output_reasoning:
                         continue
-                    yield from self._output.ensure_reasoning_block()
-                    yield self._output.emit_reasoning_delta(part.content)
+                    yield from self._output.ensure_reasoning_block(
+                        source=ORDINARY_REASONING_SOURCE
+                    )
+                    yield self._output.emit_reasoning_delta(
+                        part.content, source=ORDINARY_REASONING_SOURCE
+                    )
                 else:
                     yield from _iter_visible_text_events(self._output, part.content)
 
@@ -385,8 +396,12 @@ class _OpenAIChatStreamAssembler:
         if remaining:
             if remaining.type == ContentType.THINKING:
                 if self._output_reasoning:
-                    yield from self._output.ensure_reasoning_block()
-                    yield self._output.emit_reasoning_delta(remaining.content)
+                    yield from self._output.ensure_reasoning_block(
+                        source=ORDINARY_REASONING_SOURCE
+                    )
+                    yield self._output.emit_reasoning_delta(
+                        remaining.content, source=ORDINARY_REASONING_SOURCE
+                    )
             else:
                 yield from _iter_visible_text_events(self._output, remaining.content)
 
@@ -461,6 +476,7 @@ class OpenAIChatTransport:
         *,
         client: AsyncOpenAI,
         admission: ProviderAdmissionController,
+        history_cache: HistoryModeCache | None = None,
         behavior: OpenAIChatBehavior,
         read_timeout_s: float,
         log_raw_sse_events: bool,
@@ -471,6 +487,9 @@ class OpenAIChatTransport:
     ) -> None:
         self._client = client
         self._admission = admission
+        self._history_cache = (
+            history_cache if history_cache is not None else HistoryModeCache()
+        )
         self._behavior = behavior
         self._profile = behavior.profile
         self._provider_name = self._profile.provider_name
@@ -610,7 +629,10 @@ class OpenAIChatTransport:
             create_body = body
             validating = False
             try:
-                create_body = self._behavior.prepare_create_body(body)
+                create_body = cast(
+                    dict[str, Any],
+                    resolve_history_overrides(self._behavior.prepare_create_body(body)),
+                )
                 client = self._client
                 if endpoint is not None:
                     assert request_client is not None
@@ -637,7 +659,7 @@ class OpenAIChatTransport:
                 origin = replay_origin(
                     self._provider_name,
                     "chat",
-                    str(body["model"]),
+                    str(create_body["model"]),
                     client=client,
                     endpoint=endpoint.snapshot if endpoint is not None else None,
                 )
@@ -645,30 +667,47 @@ class OpenAIChatTransport:
                     on_origin(origin)
                 create_body = cast(
                     dict[str, Any],
-                    prepare_history(
+                    corrections.prepare_history(
                         create_body,
                         origin,
-                        scope=self._behavior.history_scope(body),
+                        self._history_cache,
                         reasoning_field=self._profile.request_policy.reasoning_replay.value,
                         structured_details=self._profile.structured_reasoning_details,
+                        continuation=operation_kind
+                        is ProviderOperationKind.CONTINUATION,
+                        finalize=lambda projected, origin=origin: (
+                            self._behavior.prepare_history_body(
+                                cast(
+                                    dict[str, Any],
+                                    apply_call_replay(projected, origin, call_replay),
+                                )
+                                if call_replay
+                                else projected,
+                                origin,
+                            )
+                        ),
                     ),
                 )
-                if call_replay:
-                    create_body = cast(
-                        dict[str, Any],
-                        apply_call_replay(create_body, origin, call_replay),
-                    )
-                create_body = self._behavior.prepare_history_body(create_body, origin)
                 if self._validate_prepared_body is not None:
                     validating = True
                     await self._validate_prepared_body(create_body)
                     validating = False
+
+                def observed(event: Any) -> None:
+                    if (
+                        getattr(event, "choices", None)
+                        or getattr(event, "usage", None) is not None
+                    ):
+                        corrections.accepted_history()
+                    if on_event is not None:
+                        on_event(event)
+
                 stream = OpenAIStreamAdapter(
                     await client.chat.completions.create(
                         **create_body,
                         stream=True,
                     ),
-                    on_event=on_event,
+                    on_event=observed,
                 )
                 stream = self._behavior.normalize_stream(stream, body)
                 retain_attempt = True
@@ -751,9 +790,7 @@ class OpenAIChatTransport:
                 return retry_body
 
         if "provider_specific" not in used_retry_kinds:
-            retry_body = self._behavior.retry_request_body(
-                error, dict(sent_body) if sent_body is not None else body
-            )
+            retry_body = self._behavior.retry_request_body(error, body)
             if retry_body is not None:
                 used_retry_kinds.add("provider_specific")
                 return retry_body
@@ -1045,16 +1082,11 @@ class _OpenAIChatStreamRunner:
             if event:
                 yield from recovery.push(event)
 
-        body = self._body
+        body = resolve_history_overrides(self._body)
         continuation_request = ContinuationRequest("chat")
         operation_kind = ProviderOperationKind.GENERATION
         if self._continuation is not None:
-            body = continuation_request.build(
-                body,
-                self._continuation.text,
-                self._continuation.thinking,
-                replay_records=self._continuation.replay_records,
-            )
+            body = continuation_request.build(body, self._continuation)
             operation_kind = ProviderOperationKind.CONTINUATION
         request_stream_usage(body)
         output_reasoning = self._reasoning.output_enabled
@@ -1739,8 +1771,14 @@ class _OpenAIChatStreamRunner:
         if recovered.native_reasoning:
             output.capture_reasoning_record(recovered.native_reasoning)
         if thinking_suffix:
-            events.extend(output.ensure_reasoning_block())
-            events.append(output.emit_reasoning_delta(thinking_suffix))
+            events.extend(
+                output.ensure_reasoning_block(source=ORDINARY_REASONING_SOURCE)
+            )
+            events.append(
+                output.emit_reasoning_delta(
+                    thinking_suffix, source=ORDINARY_REASONING_SOURCE
+                )
+            )
         if text_suffix:
             events.extend(output.ensure_text_block())
             events.append(output.emit_text_delta(text_suffix))

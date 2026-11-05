@@ -12,6 +12,7 @@ from free_claude_code.core.history_replay import (
     readable_reasoning,
     reasoning_detail,
     tool_history_context,
+    unprotected_replay,
 )
 from free_claude_code.core.json_types import JsonObject, JsonValue
 from free_claude_code.core.openai_chat import (
@@ -209,8 +210,6 @@ class _ResponsesChatInputBuilder:
                 "function": {"name": name, "arguments": arguments},
             }
         )
-        if self._reasoning_replay is ReasoningReplayMode.REASONING_CONTENT:
-            message.setdefault("reasoning_content", "")
 
     def _add_tool_output(
         self, item: Mapping[str, JsonValue], *, source_type: str | None
@@ -303,6 +302,13 @@ class _ResponsesChatInputBuilder:
         details: list[JsonValue] = []
         for item in self._pending_reasoning.take():
             encrypted = encrypted_reasoning_from_item(item)
+            unsigned = unprotected_replay(encrypted)
+            if unsigned is not None or not encrypted:
+                for text, _ in readable_reasoning(
+                    unsigned.native if unsigned else item
+                ):
+                    _apply_reasoning_text(message, text, self._reasoning_replay)
+                continue
             if encrypted and has_readable_replay(encrypted):
                 details.extend(reasoning_detail(encrypted))
                 continue
@@ -342,7 +348,7 @@ class _ResponsesChatInputBuilder:
                     continue
                 if self._structured_reasoning_details:
                     details.append({"type": "reasoning.summary", "summary": text})
-                else:
+                elif encrypted:
                     contexts.append(text)
             if encrypted and not signed:
                 details.extend(reasoning_detail(encrypted))
@@ -572,22 +578,13 @@ def _rich_function_output_parts(
 def _apply_reasoning_text(
     message: dict[str, object], text: str, mode: ReasoningReplayMode
 ) -> None:
-    if mode in {ReasoningReplayMode.REASONING_CONTENT, ReasoningReplayMode.REASONING}:
-        previous = message.get(mode.value)
-        message[mode.value] = combine_reasoning(
-            previous if isinstance(previous, str) else None, text
-        )
-        return
-    replay = (
-        f"<think>\n{text}\n</think>" if mode is ReasoningReplayMode.THINK_TAGS else text
+    field = (
+        "reasoning" if mode is ReasoningReplayMode.REASONING else "reasoning_content"
     )
-    if not replay:
-        return
-    content = message.get("content")
-    if isinstance(content, str) and content:
-        message["content"] = f"{replay}\n\n{content}"
-    else:
-        message["content"] = replay
+    previous = message.get(field)
+    message[field] = combine_reasoning(
+        previous if isinstance(previous, str) else None, text
+    )
 
 
 def _chat_tools(

@@ -65,9 +65,7 @@ def executed(body, wire):
     async def open_candidate(_index, _target, _continuation):
         return body
 
-    return ProviderExecutor(
-        AsyncMock(), progress_timeout_seconds=10
-    )._stream_candidates(
+    return ProviderExecutor(AsyncMock())._stream_candidates(
         resolved=_routed_request().resolved,
         reasoning=ReasoningPolicy.provider_default(),
         wire_api=wire,
@@ -508,8 +506,8 @@ async def test_typed_upstream_failure_qualifies_before_wire_error(
         {
             "type": "error",
             "error": {
-                "type": "overloaded_error" if retryable else "authentication_error",
-                "message": "temporary overload" if retryable else "unauthorized",
+                "type": "overloaded_error" if retryable else "invalid_request_error",
+                "message": "temporary overload" if retryable else "invalid request",
             },
         }
         if protocol == "messages"
