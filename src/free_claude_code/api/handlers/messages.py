@@ -295,18 +295,6 @@ class MessagesHandler:
         if classifier_stop_sequence is None:
             return routed
 
-        local_model = routed.resolved.original_model
-        rerouted = self._model_router.classifier_messages_request(routed)
-        if rerouted is not None:
-            routed = rerouted
-            trace_event(
-                stage="routing",
-                event="free_claude_code.api.route.safety_classifier_cloud",
-                source="api",
-                model=local_model,
-                provider_model_ref=routed.resolved.primary.provider_model_ref,
-            )
-
         reasoning_changed = routed.reasoning.control is not ReasoningControl.PREFER_OFF
         stop_sequences = routed.request.stop_sequences
         remaining_stop_sequences = (
