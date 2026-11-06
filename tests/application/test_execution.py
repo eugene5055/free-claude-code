@@ -1203,3 +1203,32 @@ async def test_context_window_refusal_moves_on_without_rating_the_provider() -> 
         assert [chunk async for chunk in stream] == ["bigger-window-frame"]
     assert [call.args[0] for call in outcome.call_args_list] == ["fallback"]
     assert outcome.call_args_list[0].args[2] is True
+
+
+@pytest.mark.asyncio
+async def test_context_refusals_report_the_largest_window() -> None:
+    def refusal(maximum: int) -> ExecutionFailure:
+        return ExecutionFailure(
+            kind=FailureKind.CONTEXT_WINDOW_EXCEEDED,
+            status_code=400,
+            message=f"prompt is too long: 138012 tokens > {maximum} maximum",
+            retryable=False,
+        )
+
+    providers = {
+        "provider": ExecutionFailureStreamConstructionProvider(refusal(114688)),
+        "fallback": ExecutionFailureStreamConstructionProvider(refusal(57344)),
+    }
+    executor = ProviderExecutor(
+        AsyncMock(
+            side_effect=lambda provider_id, _api_key_number: providers[provider_id]
+        ),
+    )
+    stream = executor.stream_messages(
+        _routed_request(_target("fallback", "model")),
+        raw_log_payload=dict,
+        request_id="req_context_widest",
+    )
+    with pytest.raises(ExecutionFailure) as raised:
+        [chunk async for chunk in stream]
+    assert raised.value.message.endswith("> 114688 maximum")

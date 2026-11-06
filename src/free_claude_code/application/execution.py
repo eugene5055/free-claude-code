@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -643,7 +644,7 @@ class ProviderExecutor:
                         _insert_spare(candidates, position, spare, automatic)
                         spare = []
                 if target.provider_model_ref not in automatic:
-                    configured_failure = candidate_failure
+                    configured_failure = _roomiest_failure(configured_failure, candidate_failure)
                 recovery_action = "continue" if continuation is not None else "restart"
                 recovery_reason = "no_candidate_output"
                 context = candidate_failure.stream_context
@@ -708,6 +709,27 @@ class ProviderExecutor:
             chunk_event=None,
             extra=stream_trace,
         )
+
+
+_CONTEXT_MAXIMUM = re.compile(r"> (\d+) maximum")
+
+
+def _roomiest_failure(previous: ExecutionFailure | None, failure: ExecutionFailure) -> ExecutionFailure:
+    """The failure to report: the latest, except that among "prompt is too long" refusals the largest window wins.
+
+    When no sibling can hold a prompt, Claude Code compacts down to the reported maximum, so reporting the smaller
+    window would throw away room the larger one has.
+    """
+    if (
+        previous is None
+        or previous.kind is not FailureKind.CONTEXT_WINDOW_EXCEEDED
+        or failure.kind is not FailureKind.CONTEXT_WINDOW_EXCEEDED
+    ):
+        return failure
+    def maximum(item: ExecutionFailure) -> int:
+        found = _CONTEXT_MAXIMUM.search(item.message or "")
+        return int(found.group(1)) if found else 0
+    return previous if maximum(previous) > maximum(failure) else failure
 
 
 def _ordered_candidates(
