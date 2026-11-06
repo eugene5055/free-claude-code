@@ -1,14 +1,21 @@
 """Custom endpoint resource ownership using FCC's existing wire transports."""
 
+import sqlite3
 from collections.abc import AsyncIterator, Mapping
 
 import httpx
 import httpx2
+from loguru import logger
 
+from free_claude_code.application import context_vault
 from free_claude_code.application.errors import InvalidRequestError
 from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.config.custom_providers import CustomProviderDefinition
-from free_claude_code.core.anthropic import MessagesRequest, ReasoningReplayMode
+from free_claude_code.core.anthropic import (
+    MessagesRequest,
+    ReasoningReplayMode,
+    get_token_count,
+)
 from free_claude_code.core.chat_completions.request import ChatRequest
 from free_claude_code.core.gemini import GeminiRequest
 from free_claude_code.core.openai_responses import (
@@ -215,16 +222,21 @@ class CustomProvider(BaseProvider):
         input_tokens is a cl100k estimate, which undercounts local tokenizers (~5% for Qwen), so it is scaled
         up; room is kept for the reply. The wording matches Anthropic's, which Claude Code parses to compact.
         """
-        window = self._definition.context_window_tokens
-        if window is None or input_tokens <= 0:
+        limit = self._context_limit(max_tokens)
+        if limit is None or input_tokens <= 0:
             return
-        reserve = min(max_tokens or _CONTEXT_REPLY_RESERVE_CAP, max(4096, window // 8))
-        limit = window - reserve
         needed = -(-input_tokens * _CONTEXT_ESTIMATE_FACTOR_PCT // 100)
         if needed > limit:
             raise context_window_exceeded_provider_failure(
                 f"prompt is too long: {needed} tokens > {limit} maximum"
             )
+
+    def _context_limit(self, max_tokens: int | None) -> int | None:
+        """Estimated prompt tokens the served window holds, with room kept for the reply."""
+        window = self._definition.context_window_tokens
+        if window is None:
+            return None
+        return window - min(max_tokens or _CONTEXT_REPLY_RESERVE_CAP, max(4096, window // 8))
 
     def _reasoning(self, reasoning: ReasoningPolicy) -> ReasoningPolicy:
         mode = self._definition.reasoning_format
@@ -253,7 +265,57 @@ class CustomProvider(BaseProvider):
         model_info: ProviderModelInfo | None = None,
         continuation: ContinuationSeed | None = None,
     ) -> AsyncIterator[str]:
-        self._check_context_window(input_tokens, request.max_tokens)
+        """Stream a reply. With a declared window, nothing the conversation held is lost (context_vault): every
+        request is archived; one no window holds is fitted by the roomiest sibling (FIT) instead of refused, and
+        after Claude Code compacted, the model can recall what it dropped."""
+        limit = self._context_limit(request.max_tokens)
+        options = {
+            "request_id": request_id,
+            "response_model": response_model,
+            "reasoning": reasoning,
+            "model_info": model_info,
+        }
+        if limit is None:
+            return self._stream_raw(request, input_tokens, continuation=continuation, **options)
+        fitting = context_vault.FIT.get()
+        if not fitting:
+            self._check_context_window(input_tokens, request.max_tokens)
+        vault = context_vault.default_vault()
+        session = context_vault.session_key(request, request_headers)
+        try:
+            present = vault.archive(session, request)
+            recalling = fitting or context_vault.needs_vault(request, vault, session, present)
+        except sqlite3.Error as error:
+            logger.warning("Context vault unavailable: {}", error)
+            if fitting:
+                raise context_window_exceeded_provider_failure(
+                    f"prompt is too long: {input_tokens} tokens > {limit} maximum (context vault unavailable)"
+                ) from error
+            recalling = False
+        if not recalling:
+            return self._stream_raw(request, input_tokens, continuation=continuation, **options)
+
+        def open_round(prepared: MessagesRequest, number: int) -> AsyncIterator[str]:
+            tokens = get_token_count(prepared.messages, prepared.system, prepared.tools)
+            return self._stream_raw(
+                prepared, tokens, continuation=continuation if number == 1 else None, **options
+            )
+
+        return context_vault.recall_stream(
+            request, vault=vault, session=session, limit=limit, open_round=open_round
+        )
+
+    def _stream_raw(
+        self,
+        request: MessagesRequest,
+        input_tokens: int = 0,
+        *,
+        request_id: str | None = None,
+        response_model: str | None = None,
+        reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
+        model_info: ProviderModelInfo | None = None,
+        continuation: ContinuationSeed | None = None,
+    ) -> AsyncIterator[str]:
         reasoning = self._reasoning(reasoning)
         if (
             self._definition.reasoning_format == "provider_default"

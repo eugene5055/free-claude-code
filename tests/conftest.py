@@ -324,3 +324,14 @@ async def database_factory():
     finally:
         for database in reversed(databases):
             await database.close()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_context_vault(tmp_path_factory, monkeypatch):
+    """Tests never write the real context vault (~/.fcc/context_vault.sqlite3)."""
+    monkeypatch.setenv("FCC_CONTEXT_VAULT", str(tmp_path_factory.mktemp("vault") / "vault.sqlite3"))
+    yield
+    from free_claude_code.application import context_vault
+
+    if context_vault._default is not None:
+        context_vault._default.close()
