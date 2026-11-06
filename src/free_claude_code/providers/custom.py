@@ -27,6 +27,8 @@ from free_claude_code.core.reasoning import (
     ReasoningEffort,
     ReasoningPolicy,
 )
+from free_claude_code.core.anthropic.tokens import get_token_count
+from free_claude_code.core.safety_classifier import is_safety_classifier
 from free_claude_code.core.stream_recovery import ContinuationSeed
 from free_claude_code.providers.admission import (
     ProviderAdmissionController,
@@ -277,6 +279,10 @@ class CustomProvider(BaseProvider):
         }
         if limit is None:
             return self._stream_raw(request, input_tokens, continuation=continuation, **options)
+        if is_safety_classifier(request):
+            return self._stream_classifier(
+                request, input_tokens, limit, continuation=continuation, **options
+            )
         fitting = context_vault.FIT.get()
         if not fitting:
             self._check_context_window(input_tokens, request.max_tokens)
@@ -304,6 +310,29 @@ class CustomProvider(BaseProvider):
         return context_vault.recall_stream(
             request, vault=vault, session=session, limit=limit, open_round=open_round
         )
+
+    def _stream_classifier(
+        self,
+        request: MessagesRequest,
+        input_tokens: int,
+        limit: int,
+        *,
+        continuation: ContinuationSeed | None,
+        **options,
+    ) -> AsyncIterator[str]:
+        """Claude's auto-mode safety classifier sees the transcript Claude Code sent: never archived, never
+        vault-fitted, no recall tool. Too long here moves it to a roomier sibling; with none left (FIT), only old
+        tool-call entries are dropped, never the user's words (context_vault.fit_classifier)."""
+        if not context_vault.FIT.get():
+            self._check_context_window(input_tokens, request.max_tokens)
+            return self._stream_raw(request, input_tokens, continuation=continuation, **options)
+        trimmed = context_vault.fit_classifier(request, limit)
+        if trimmed is None:
+            raise context_window_exceeded_provider_failure(
+                f"prompt is too long: {input_tokens} tokens > {limit} maximum (safety classifier)"
+            )
+        tokens = get_token_count(trimmed.messages, trimmed.system, trimmed.tools)
+        return self._stream_raw(trimmed, tokens, continuation=continuation, **options)
 
     def _stream_raw(
         self,

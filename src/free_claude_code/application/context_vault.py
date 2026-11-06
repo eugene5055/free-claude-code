@@ -725,3 +725,69 @@ async def recall_stream(
                 data = {**data, "delta": {**data["delta"], "stop_reason": "end_turn"}}
             yield _event(kind, data)
         return
+
+
+CLASSIFIER_KEEP_TAIL = 6  # newest transcript entries a classifier trim never drops (the action being judged)
+_CLASSIFIER_NOTE = (
+    '{{"fcc_note":"{n} older tool-call entries omitted to fit this model context window; '
+    'every user message is kept"}}\n'
+)
+
+
+def fit_classifier(request: MessagesRequest, limit: int) -> MessagesRequest | None:
+    """Claude's safety classifier transcript within `limit`, or None if it cannot fit.
+
+    Never placeholders or recall (the classifier must see what the user said): only the oldest non-user
+    transcript entries are dropped. Every {"user": ...} entry, text outside the transcript (CLAUDE.md) and the
+    newest entries stay verbatim (user, 2026-11-06: a vault-fitted transcript hid the user's approval and the
+    local model blocked an approved command).
+    """
+    messages = [m.model_dump(exclude_none=True) for m in request.messages]
+    for message in messages:
+        if isinstance(message.get("content"), str):
+            message["content"] = [{"type": "text", "text": message["content"]}]
+    split: dict[tuple[int, int], list[str]] = {}
+    entries: list[tuple[int, int, int]] = []
+    inside = False
+    for i, message in enumerate(messages):
+        for j, block in enumerate(message["content"]):
+            if block.get("type") != "text":
+                continue
+            parts = block.get("text", "").splitlines(keepends=True)
+            split[(i, j)] = parts
+            for k, line in enumerate(parts):
+                if "<transcript>" in line:
+                    inside = True
+                elif "</transcript>" in line:
+                    inside = False
+                elif inside and line.strip():
+                    entries.append((i, j, k))
+    older = entries[:-CLASSIFIER_KEEP_TAIL] if len(entries) > CLASSIFIER_KEEP_TAIL else []
+    droppable = [
+        p for p in older if not split[p[:2]][p[2]].lstrip().startswith('{"user"')
+    ]
+    needed = _estimate(request)
+    dropped: list[tuple[int, int, int]] = []
+    for i, j, k in droppable:
+        if needed <= limit:
+            break
+        needed -= estimate_text_tokens(split[(i, j)][k]) * ESTIMATE_FACTOR_PCT // 100
+        split[(i, j)][k] = ""
+        dropped.append((i, j, k))
+    if dropped:
+        i, j, k = dropped[0]
+        split[(i, j)][k] = _CLASSIFIER_NOTE.format(n=len(dropped))
+    for (i, j), parts in split.items():
+        messages[i]["content"][j]["text"] = "".join(parts)
+    fitted = request.model_copy(
+        update={"messages": [Message.model_validate(m) for m in messages]}
+    )
+    if _estimate(fitted) > limit:
+        return None
+    if dropped:
+        logger.info(
+            "Safety classifier trim: dropped={} kept_user_entries=all limit={}",
+            len(dropped),
+            limit,
+        )
+    return fitted
