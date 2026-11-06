@@ -14,7 +14,7 @@ from free_claude_code.api.response_streams import (
     terminal_execution_error_response,
     trace_terminal_execution_error,
 )
-from free_claude_code.api.stream_frames import frame_data
+from free_claude_code.api.stream_frames import decimal_json_response, frame_data
 from free_claude_code.application.errors import ApplicationError, InvalidRequestError
 from free_claude_code.application.execution import ProviderExecutor
 from free_claude_code.application.ports import ModelInfoLookup, ProviderResolver
@@ -87,7 +87,7 @@ class ChatHandler:
                         consume(frame)
                 for frame in decoder.finish_frames():
                     consume(frame)
-                return JSONResponse(content=aggregate.result())
+                return decimal_json_response(aggregate.result())
             finally:
                 await response.aclose()
         except (Exception, BaseExceptionGroup) as error:

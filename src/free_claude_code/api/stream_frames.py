@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import simplejson
+from fastapi.responses import Response
 
 
 def frame_data(frame: str) -> dict[str, Any] | None:
@@ -39,3 +40,16 @@ def replace_frame_data(frame: str, payload: Mapping[str, object]) -> str:
             replaced = True
         parts.extend((line, ending))
     return "".join(parts)
+
+
+def decimal_json_response(content: object, status_code: int = 200) -> Response:
+    """JSON response that keeps Decimal values parsed from upstream SSE frames.
+
+    frame_data parses with use_decimal=True, so aggregated non-stream bodies can
+    carry Decimal (e.g. llama.cpp "timings"); stdlib JSONResponse rejects them.
+    """
+    return Response(
+        content=simplejson.dumps(content, use_decimal=True, ensure_ascii=False),
+        status_code=status_code,
+        media_type="application/json",
+    )

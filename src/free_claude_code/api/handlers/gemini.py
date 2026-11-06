@@ -14,6 +14,7 @@ from free_claude_code.api.response_streams import (
     terminal_execution_error_response,
     trace_terminal_execution_error,
 )
+from free_claude_code.api.stream_frames import decimal_json_response
 from free_claude_code.application.errors import ApplicationError
 from free_claude_code.application.execution import ProviderExecutor
 from free_claude_code.application.ports import ModelInfoLookup, ProviderResolver
@@ -82,7 +83,7 @@ class GeminiHandler:
                         aggregate.feed(event.data)
                 for event in decoder.finish():
                     aggregate.feed(event.data)
-                return JSONResponse(content=aggregate.result())
+                return decimal_json_response(aggregate.result())
             finally:
                 await response.aclose()
         except (Exception, BaseExceptionGroup) as error:
