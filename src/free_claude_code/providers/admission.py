@@ -38,6 +38,9 @@ T = TypeVar("T")
 UPSTREAM_TRANSIENT_TOTAL_ATTEMPTS = 10
 DEFAULT_UPSTREAM_BASE_DELAY = 2.0
 DEFAULT_UPSTREAM_MAX_DELAY = 60.0
+# A 429 whose Retry-After is longer than this (an exhausted monthly or plan quota says days) is not waited for:
+# the request fails over to the next model at once instead of holding its caller until the quota resets.
+LONG_RETRY_AFTER = 300.0
 DEFAULT_UPSTREAM_JITTER = 1.0
 
 _quiet_discovery = ContextVar("quiet_discovery_recovery_logs", default=False)
@@ -380,6 +383,8 @@ class ProviderAttempt:
             and (
                 kimi_plan.exhausted(self._controller._provider_name) is not None
                 or is_daily_quota_exhausted(effective_error)
+                or (_retry_after_seconds(effective_error) or 0.0)
+                > max(LONG_RETRY_AFTER, self._controller._max_delay)
             )
         ):
             # A used-up Kimi Code plan window or daily allowance lasts hours: fail fast so other models

@@ -1064,3 +1064,51 @@ async def test_a_per_minute_429_still_retries() -> None:
         == "ok"
     )
     assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_a_429_that_asks_for_a_wait_of_days_is_attempted_once() -> None:
+    """Aliyun's token plan answered an exhausted quota with Retry-After of ~25 days; admission slept on it and the
+    caller hung. It must fail at once so the next model takes the request."""
+    controller = _controller(max_delay=60.0)
+    attempts = 0
+
+    async def refuse() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise _status_error(429, retry_after="2154274")
+
+    with (
+        patch("free_claude_code.providers.admission.asyncio.sleep") as sleep,
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        await controller.start_execution().run_call(
+            refuse,
+            operation_kind=ProviderOperationKind.GENERATION,
+        )
+
+    assert attempts == 1
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_429_with_a_short_retry_after_still_retries() -> None:
+    controller = _controller(max_delay=60.0)
+    attempts = 0
+
+    async def refuse_then_answer() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise _status_error(429, retry_after="30")
+        return "ok"
+
+    with patch("free_claude_code.providers.admission.asyncio.sleep") as sleep:
+        result = await controller.start_execution().run_call(
+            refuse_then_answer,
+            operation_kind=ProviderOperationKind.GENERATION,
+        )
+
+    assert result == "ok"
+    assert attempts == 2
+    sleep.assert_awaited()
