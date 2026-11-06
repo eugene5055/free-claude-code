@@ -425,6 +425,52 @@ class ModelRouter:
             ),
         )
 
+    def classifier_messages_request(
+        self, routed: RoutedMessagesRequest
+    ) -> RoutedMessagesRequest | None:
+        """Move a Claude auto-mode safety classifier call off local custom providers.
+
+        The local GPU models wrongly blocked user-approved commands (user,
+        2026-11-06: "make sure it never happens again"), so the classifier runs on
+        the configured MODEL and its cloud fallbacks, never on a custom provider.
+        Returns None when the request is already off custom providers or no cloud
+        model is configured.
+        """
+        if not _is_custom(routed.resolved.primary.provider_id):
+            return None
+        model = self._settings.model
+        if not model or _is_custom(parse_provider_type(model)):
+            return None
+        try:
+            cloud = self.resolve(model)
+        except Exception as exc:  # A broken MODEL must not break the request.
+            logger.warning("CLASSIFIER ROUTE: MODEL {!r} unusable: {}", model, exc)
+            return None
+        candidates = [ProviderModelCandidate(cloud.primary), *cloud.fallbacks]
+        cloud_only = [c for c in candidates if not _is_custom(c.target.provider_id)]
+        if not cloud_only:
+            return None
+        primary, *rest = cloud_only
+        resolved = replace(
+            cloud,
+            original_model=routed.resolved.original_model,
+            primary=primary.target,
+            fallbacks=tuple(rest),
+            same_model_only=False,
+        )
+        logger.info(
+            "CLASSIFIER ROUTE: '{}' -> '{}' (never local custom providers)",
+            routed.resolved.original_model,
+            primary.target.provider_model_ref,
+        )
+        return replace(
+            routed,
+            request=routed.request.model_copy(
+                update={"model": primary.target.provider_model}
+            ),
+            resolved=resolved,
+        )
+
     def resolve_messages_request_with_policy(
         self,
         request: MessagesRequest,
@@ -498,3 +544,8 @@ class ModelRouter:
                 request, resolved.reasoning_preference
             ),
         )
+
+
+def _is_custom(provider_id: str) -> bool:
+    """Custom providers are the user's own endpoints (the local GPUs)."""
+    return provider_id.startswith("custom_")
