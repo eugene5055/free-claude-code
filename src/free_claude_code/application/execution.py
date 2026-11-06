@@ -616,10 +616,12 @@ class ProviderExecutor:
                     model_usability.record_success(target.provider_model_ref)
                     provider_health.record_success(target.provider_id, target.provider_model)
                     return
-                record_outcome(
-                    target.provider_id, _kind_for_model(target.provider_model), False,
-                    monotonic() - candidate_started,
-                )
+                if candidate_failure.kind is not FailureKind.CONTEXT_WINDOW_EXCEEDED:
+                    # A prompt larger than the model's window is not the provider's fault.
+                    record_outcome(
+                        target.provider_id, _kind_for_model(target.provider_model), False,
+                        monotonic() - candidate_started,
+                    )
                 model_usability.record_failure(target.provider_model_ref, candidate_failure)
                 if (
                     candidate_failure.kind is FailureKind.RATE_LIMIT

@@ -45,6 +45,10 @@ class CustomProviderDefinition(BaseModel):
         "disabled", "reasoning_content", "reasoning", "think_tags"
     ] = "disabled"
     model_ids: tuple[str, ...] = ()
+    # The served context window (llama-server --ctx-size). When set, a request that cannot fit is refused
+    # up front with "prompt is too long", so a grouped model moves to a larger sibling and Claude Code
+    # compacts instead of the server truncating the prompt.
+    context_window_tokens: int | None = Field(default=None, ge=1024)
 
     @field_validator("display_name", mode="before")
     @classmethod

@@ -776,3 +776,65 @@ async def test_messages_discovery_retains_text_and_advertised_limits(vision):
         assert info.max_output_tokens == 32000
     finally:
         await instance.cleanup()
+
+
+@pytest.mark.parametrize("api_format", ["openai_chat", "anthropic_messages"])
+async def test_context_window_refuses_oversized_prompt_before_sending(api_format):
+    from free_claude_code.core.failures import ExecutionFailure, FailureKind
+    from free_claude_code.core.anthropic.errors import anthropic_failure_payload
+
+    requests = []
+
+    def reply(request):
+        requests.append(request)
+        response = (
+            httpx.Response if api_format == "anthropic_messages" else httpx2.Response
+        )
+        return response(
+            200, text=completion(api_format), headers={"content-type": "text/event-stream"}
+        )
+
+    instance = provider(
+        definition(api_format=api_format, context_window_tokens=65536),
+        openai_handler=reply,
+        messages_handler=reply,
+    )
+    request = MessagesRequest(
+        model="m", max_tokens=32000, messages=[{"role": "user", "content": "Hello"}]
+    )
+    try:
+        # 65536 - 8192 reply room = 57344; 50000 * 1.15 = 57500 does not fit.
+        with pytest.raises(ExecutionFailure) as refused:
+            instance.stream_messages(request, input_tokens=50000)
+        assert refused.value.kind is FailureKind.CONTEXT_WINDOW_EXCEEDED
+        message = anthropic_failure_payload(refused.value)["error"]["message"]
+        assert message == "prompt is too long: 57500 tokens > 57344 maximum"
+        assert requests == []
+        # 49000 * 1.15 = 56350 fits and is sent.
+        stream = instance.stream_messages(request, input_tokens=49000)
+        assert [event async for event in stream]
+        assert len(requests) == 1
+    finally:
+        await instance.cleanup()
+
+
+async def test_context_window_unset_never_refuses():
+    instance = provider(
+        definition(api_format="openai_chat"),
+        openai_handler=lambda request: httpx2.Response(
+            200, text=completion("openai_chat"), headers={"content-type": "text/event-stream"}
+        ),
+    )
+    try:
+        stream = instance.stream_messages(
+            MessagesRequest(model="m", max_tokens=64, messages=[{"role": "user", "content": "Hi"}]),
+            input_tokens=10_000_000,
+        )
+        assert [event async for event in stream]
+    finally:
+        await instance.cleanup()
+
+
+async def test_context_window_rejects_tiny_value():
+    with pytest.raises(ValueError):
+        definition(context_window_tokens=100)

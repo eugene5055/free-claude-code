@@ -37,6 +37,9 @@ from free_claude_code.providers.anthropic_messages.transport import (
 )
 from free_claude_code.providers.base import BaseProvider, ProviderConfig
 from free_claude_code.providers.endpoint_types import HttpEndpoint
+from free_claude_code.providers.failure_policy import (
+    context_window_exceeded_provider_failure,
+)
 from free_claude_code.providers.history_negotiation import HistoryModeCache
 from free_claude_code.providers.model_listing import (
     extract_openai_model_infos,
@@ -89,6 +92,10 @@ def _reasoning_encoder(name: str) -> ReasoningEncoder:
 
 async def _omit_cookies(request: httpx.Request) -> None:
     request.headers.pop("cookie", None)
+
+
+_CONTEXT_ESTIMATE_FACTOR_PCT = 115
+_CONTEXT_REPLY_RESERVE_CAP = 16384
 
 
 class CustomProvider(BaseProvider):
@@ -202,6 +209,23 @@ class CustomProvider(BaseProvider):
         if self._openai_transport is not None:
             await self._openai_transport.aclose()
 
+    def _check_context_window(self, input_tokens: int, max_tokens: int | None) -> None:
+        """Refuse a prompt the served window cannot hold, before it reaches the server.
+
+        input_tokens is a cl100k estimate, which undercounts local tokenizers (~5% for Qwen), so it is scaled
+        up; room is kept for the reply. The wording matches Anthropic's, which Claude Code parses to compact.
+        """
+        window = self._definition.context_window_tokens
+        if window is None or input_tokens <= 0:
+            return
+        reserve = min(max_tokens or _CONTEXT_REPLY_RESERVE_CAP, max(4096, window // 8))
+        limit = window - reserve
+        needed = -(-input_tokens * _CONTEXT_ESTIMATE_FACTOR_PCT // 100)
+        if needed > limit:
+            raise context_window_exceeded_provider_failure(
+                f"prompt is too long: {needed} tokens > {limit} maximum"
+            )
+
     def _reasoning(self, reasoning: ReasoningPolicy) -> ReasoningPolicy:
         mode = self._definition.reasoning_format
         if mode == "provider_default":
@@ -229,6 +253,7 @@ class CustomProvider(BaseProvider):
         model_info: ProviderModelInfo | None = None,
         continuation: ContinuationSeed | None = None,
     ) -> AsyncIterator[str]:
+        self._check_context_window(input_tokens, request.max_tokens)
         reasoning = self._reasoning(reasoning)
         if (
             self._definition.reasoning_format == "provider_default"

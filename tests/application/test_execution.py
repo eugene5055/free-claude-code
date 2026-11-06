@@ -1176,3 +1176,30 @@ async def test_empty_chunks_allow_caller_cancellation():
         with pytest.raises(asyncio.CancelledError):
             await task
     assert provider.stream_close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_context_window_refusal_moves_on_without_rating_the_provider() -> None:
+    refusal = ExecutionFailure(
+        kind=FailureKind.CONTEXT_WINDOW_EXCEEDED,
+        status_code=400,
+        message="prompt is too long: 70000 tokens > 57344 maximum",
+        retryable=False,
+    )
+    primary = ExecutionFailureStreamConstructionProvider(refusal)
+    fallback = ControlledProvider(["bigger-window-frame"])
+    providers = {"provider": primary, "fallback": fallback}
+    executor = ProviderExecutor(
+        AsyncMock(
+            side_effect=lambda provider_id, _api_key_number: providers[provider_id]
+        ),
+    )
+    with patch("free_claude_code.application.execution.record_outcome") as outcome:
+        stream = executor.stream_messages(
+            _routed_request(_target("fallback", "model")),
+            raw_log_payload=dict,
+            request_id="req_context_window",
+        )
+        assert [chunk async for chunk in stream] == ["bigger-window-frame"]
+    assert [call.args[0] for call in outcome.call_args_list] == ["fallback"]
+    assert outcome.call_args_list[0].args[2] is True
