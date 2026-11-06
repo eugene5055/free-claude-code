@@ -134,18 +134,13 @@ class GeminiProvider(BaseProvider):
                 raise ValueError("Gemini model discovery repeated a page token")
             seen.add(page_token)
 
-    def stream_messages(
+    def _build_messages_body(
         self,
         request: MessagesRequest,
-        input_tokens: int = 0,
+        reasoning: ReasoningPolicy,
         *,
-        request_id: str | None = None,
-        response_model: str | None = None,
-        reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
-        request_headers: Mapping[str, str] | None = None,
         model_info: ProviderModelInfo | None = None,
-        continuation: ContinuationSeed | None = None,
-    ) -> AsyncIterator[str]:
+    ) -> tuple[dict[str, Any], ReasoningCorrection | None]:
         prepared, wire_reasoning = prepare_messages_reasoning(
             request,
             reasoning,
@@ -170,6 +165,23 @@ class GeminiProvider(BaseProvider):
             if reasoning.control is ReasoningControl.PREFER_OFF
             and wire_reasoning.control is ReasoningControl.OFF
             else None
+        )
+        return body, correction
+
+    def stream_messages(
+        self,
+        request: MessagesRequest,
+        input_tokens: int = 0,
+        *,
+        request_id: str | None = None,
+        response_model: str | None = None,
+        reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
+        request_headers: Mapping[str, str] | None = None,
+        model_info: ProviderModelInfo | None = None,
+        continuation: ContinuationSeed | None = None,
+    ) -> AsyncIterator[str]:
+        body, correction = self._build_messages_body(
+            request, reasoning, model_info=model_info
         )
         public_model = response_model or request.model
         message_id = f"msg_{uuid4().hex}"

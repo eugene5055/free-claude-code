@@ -141,6 +141,14 @@ def test_every_duo_route_sends_an_explicit_reasoning_control(
             "messages": [{"role": "user", "content": "hi"}],
         }
     )
+    if provider_id == "gemini":
+        # Upstream moved Gemini to native GenerateContent egress.
+        body, _ = provider._build_messages_body(request, policy)
+        thinking = body["generationConfig"]["thinkingConfig"]
+        assert {"thinkingBudget", "thinkingLevel"} & thinking.keys(), (
+            f"gemini sent no reasoning control: {body}"
+        )
+        return
     chat = provider._chat
     body = chat._build_request_body(request, reasoning=policy)
     off_fields = chat._behavior.reasoning_off_fields

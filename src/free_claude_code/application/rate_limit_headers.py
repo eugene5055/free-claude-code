@@ -167,7 +167,11 @@ def install() -> None:
         except ImportError:
             continue
     for module in modules:
-        original = module.AsyncClient.send
+        client_class = getattr(module, "AsyncClient", None)
+        # Tests may replace AsyncClient with a factory; only wrap the real class.
+        if not isinstance(client_class, type):
+            continue
+        original = client_class.send
 
         async def send(self, request, *args, _original=original, **kwargs):
             response = await _original(self, request, *args, **kwargs)
@@ -177,4 +181,4 @@ def install() -> None:
                 logger.debug("Rate-limit header capture failed: {}", exc)
             return response
 
-        module.AsyncClient.send = send
+        client_class.send = send
