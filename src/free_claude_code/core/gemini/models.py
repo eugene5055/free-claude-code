@@ -114,7 +114,16 @@ class FunctionDeclaration(GeminiModel):
 
 
 class Tool(GeminiModel):
-    function_declarations: list[FunctionDeclaration] = Field(min_length=1)
+    function_declarations: list[FunctionDeclaration] = Field(default_factory=list)
+    # Gemini's built-in search (Antigravity's WebSearch). FCC runs the search
+    # itself; options such as timeRangeFilter are accepted and not applied.
+    google_search: JsonObject | None = None
+
+    @model_validator(mode="after")
+    def one_tool_variant(self) -> Self:
+        if bool(self.function_declarations) == (self.google_search is not None):
+            raise ValueError("A tool requires functionDeclarations or googleSearch")
+        return self
 
 
 class FunctionCallingConfig(GeminiModel):
@@ -254,6 +263,10 @@ class GeminiRequest(GeminiModel):
         if config.mode == "ANY" and not names:
             raise ValueError("ANY function calling requires declared functions")
         return self
+
+    @property
+    def requests_google_search(self) -> bool:
+        return any(tool.google_search is not None for tool in self.tools)
 
     @property
     def include_thoughts(self) -> bool:

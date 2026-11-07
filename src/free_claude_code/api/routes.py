@@ -9,10 +9,11 @@ from fastapi.exceptions import RequestValidationError
 from loguru import logger
 from pydantic import ValidationError
 
-from free_claude_code.application.provider_quota import ProviderQuotaService
 from free_claude_code.application.errors import ApplicationError, InvalidRequestError
 from free_claude_code.application.ports import ProviderResolver, RequestRuntimeLease
+from free_claude_code.application.provider_quota import ProviderQuotaService
 from free_claude_code.application.routing import ModelRouter, supports_native_messages
+from free_claude_code.application.usage_report import UsageDatabase
 from free_claude_code.config.model_refs import parse_provider_type
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.anthropic import (
@@ -31,7 +32,6 @@ from free_claude_code.core.gemini import GeminiRequest
 from free_claude_code.core.json_types import JsonObject
 from free_claude_code.core.openai_responses import OpenAIResponsesRequest
 from free_claude_code.core.trace import trace_event
-from free_claude_code.application.usage_report import UsageDatabase
 
 from .dependencies import (
     get_services,
@@ -120,6 +120,7 @@ async def create_gemini_response(
                 if key.lower() not in {"authorization", "x-api-key", "x-goog-api-key"}
             },
             model_info_lookup=lease.model_info,
+            web_tools=services.web_tools,
         )
         response = await handler.create(
             data, streaming=streaming, request_id=get_request_id(request)
@@ -558,19 +559,24 @@ async def session_usage_api(
         total_duration = row["total_duration"] or 0.0
         request_count = row["request_count"] or 0
 
-        by_model.append({
-            "provider_id": provider_id,
-            "model": model,
-            "wire_api": wire_api,
-            "input_tokens": total_input,
-            "output_tokens": total_output,
-            "cache_read_tokens": total_cache_read,
-            "cache_write_tokens": total_cache_write,
-            "total_tokens": total_input + total_output + total_cache_read + total_cache_write,
-            "cost_usd": round(total_cost, 6),
-            "duration_ms": round(total_duration, 2),
-            "request_count": request_count,
-        })
+        by_model.append(
+            {
+                "provider_id": provider_id,
+                "model": model,
+                "wire_api": wire_api,
+                "input_tokens": total_input,
+                "output_tokens": total_output,
+                "cache_read_tokens": total_cache_read,
+                "cache_write_tokens": total_cache_write,
+                "total_tokens": total_input
+                + total_output
+                + total_cache_read
+                + total_cache_write,
+                "cost_usd": round(total_cost, 6),
+                "duration_ms": round(total_duration, 2),
+                "request_count": request_count,
+            }
+        )
 
         if provider_id not in by_provider:
             by_provider[provider_id] = {
