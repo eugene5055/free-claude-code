@@ -1,5 +1,6 @@
 """Custom endpoint resource ownership using FCC's existing wire transports."""
 
+import dataclasses
 from collections.abc import AsyncIterator, Mapping
 
 import httpx
@@ -232,7 +233,9 @@ class CustomProvider(BaseProvider):
         window = self._definition.context_window_tokens
         if window is None:
             return None
-        return window - min(max_tokens or _CONTEXT_REPLY_RESERVE_CAP, max(4096, window // 8))
+        return window - min(
+            max_tokens or _CONTEXT_REPLY_RESERVE_CAP, max(4096, window // 8)
+        )
 
     def _reasoning(self, reasoning: ReasoningPolicy) -> ReasoningPolicy:
         mode = self._definition.reasoning_format
@@ -272,7 +275,9 @@ class CustomProvider(BaseProvider):
         }
         if limit is not None:
             self._check_context_window(input_tokens, request.max_tokens)
-        return self._stream_raw(request, input_tokens, continuation=continuation, **options)
+        return self._stream_raw(
+            request, input_tokens, continuation=continuation, **options
+        )
 
     def _stream_raw(
         self,
@@ -449,6 +454,19 @@ class CustomProvider(BaseProvider):
         )
 
     async def list_model_infos(self) -> frozenset[ProviderModelInfo]:
+        """Listed models, with the configured window where the server reports none."""
+        infos = await self._listed_model_infos()
+        window = self._definition.context_window_tokens
+        if window is None:
+            return infos
+        return frozenset(
+            info
+            if info.context_window_tokens is not None
+            else dataclasses.replace(info, context_window_tokens=window)
+            for info in infos
+        )
+
+    async def _listed_model_infos(self) -> frozenset[ProviderModelInfo]:
         if self._definition.model_ids:
             return model_infos_from_ids(self._definition.model_ids)
         if self._sdk is not None:
