@@ -342,3 +342,69 @@ async def test_the_last_round_has_no_recall_tool_so_the_model_must_answer(vault)
     assert [e["delta"]["stop_reason"] for e in out if e["type"] == "message_delta"] == [
         "end_turn"
     ]
+
+
+def _tool_turn(k: int):
+    return [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": f"toolu_t{k}", "name": "Bash", "input": {"command": f"ls {k}"}}]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": f"toolu_t{k}", "content": f"file{k}.txt"},
+            {"type": "text", "text": "<system-reminder>\nKeep going.\n</system-reminder>"},
+        ]},
+    ]
+
+
+def _note_index(request: MessagesRequest) -> list[int]:
+    return [
+        i for i, m in enumerate(request.messages)
+        if "[FCC vault: parts of this conversation" in json.dumps(m.model_dump())
+    ]
+
+
+def _note(request: MessagesRequest, index: int) -> str:
+    return next(
+        b.text for b in request.messages[index].content
+        if getattr(b, "type", None) == "text" and b.text.startswith("[FCC vault")
+    )
+
+
+def test_the_recall_note_rides_the_users_typed_message_and_stays_the_same_across_tool_turns(vault):
+    vault.archive("anchor", big_request(files=2, chars=5000))
+    typed = {"role": "user", "content": "Read every file alpha0 alpha1 and find the heron launch code"}
+    first = MessagesRequest(model="m", max_tokens=100, messages=[typed, *_tool_turn(1)])
+    vault.archive("anchor", first)
+    a = cv._with_recalled(first, 230000, vault, "anchor", 0)
+    later = MessagesRequest(model="m", max_tokens=100, messages=[typed, *_tool_turn(1), *_tool_turn(2)])
+    vault.archive("anchor", later)  # the corpus grows every turn; the note must not change with it
+    b = cv._with_recalled(later, 230000, vault, "anchor", 0)
+    assert _note_index(a) == _note_index(b) == [0]  # not the newest tool-result message
+    assert NEEDLE in _note(a, 0)
+    assert _note(a, 0) == _note(b, 0)  # byte-identical: the server's prompt cache keeps it
+    assert a.messages[0].model_dump() == b.messages[0].model_dump()
+
+
+def test_a_new_typed_message_moves_the_recall_note_and_chooses_passages_again(vault):
+    vault.archive("moves", big_request(files=2, chars=5000))
+    typed = {"role": "user", "content": "Read every file alpha0 and summarise"}
+    first = MessagesRequest(model="m", max_tokens=100, messages=[typed, *_tool_turn(1)])
+    vault.archive("moves", first)
+    cv._with_recalled(first, 230000, vault, "moves", 0)
+    follow = {"role": "user", "content": "Now what is the heron launch code?"}
+    second = MessagesRequest(
+        model="m", max_tokens=100,
+        messages=[typed, *_tool_turn(1), {"role": "assistant", "content": "Done."}, follow],
+    )
+    vault.archive("moves", second)
+    out = cv._with_recalled(second, 230000, vault, "moves", 0)
+    assert _note_index(out) == [len(second.messages) - 1]
+    assert NEEDLE in _note(out, len(second.messages) - 1)
+
+
+def test_a_cached_note_that_no_longer_fits_is_chosen_again(vault):
+    vault.archive("shrink", big_request(files=4, chars=5000))
+    typed = {"role": "user", "content": "Read every file alpha0 alpha1 alpha2 alpha3"}
+    request = MessagesRequest(model="m", max_tokens=100, messages=[typed, *_tool_turn(1)])
+    vault.archive("shrink", request)
+    roomy = cv._with_recalled(request, 230000, vault, "shrink", 0)
+    tight = cv._with_recalled(request, 6000, vault, "shrink", 0)
+    assert len(_note(tight, 0)) < len(_note(roomy, 0))

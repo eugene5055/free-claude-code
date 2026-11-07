@@ -478,17 +478,55 @@ def fit(
     return _with_recalled(fitted, limit, vault, session, replaced)
 
 
+# (session, anchor) -> passages chosen for it. The note keeps the same passages until the user types again.
+_RECALLED: dict[tuple[str, str], list[tuple[str, str]]] = {}
+_RECALLED_MAX = 64
+
+
+def _typed(message: Message) -> bool:
+    """Whether a user message holds words the user typed, not only tool results and system reminders."""
+    if message.role != "user":
+        return False
+    return any(
+        _get(block, "type") == "text"
+        and _REMINDER.sub("", str(_get(block, "text", "") or "")).strip()
+        for block in _blocks(message)
+    )
+
+
+def _anchor(messages: list[Message]) -> int | None:
+    """Where the recall note goes: the user's latest typed message (else the latest user message)."""
+    users = [i for i, m in enumerate(messages) if m.role == "user"]
+    typed = [i for i in users if _typed(messages[i])]
+    return (typed or users or [None])[-1]
+
+
 def _with_recalled(
     request: MessagesRequest, limit: int, vault: Vault, session: str, replaced: int
 ) -> MessagesRequest:
-    present = {digest for digest, _, _ in request_pieces(request)}
+    """The request plus a note with the archived passages that match the task.
+
+    User, 2026-11-06: the note went on the newest message with passages chosen afresh every turn, so a local
+    server re-read ~22K tokens on every tool call. It now goes on the user's latest typed message and keeps the
+    same passages until the user types again, so the prompt prefix (and the server's cache) holds across turns."""
+    messages = list(request.messages)
+    index = _anchor(messages)
     room = min(limit - _estimate(request), max(1024, limit // RECALL_SHARE)) - 200
-    passages = vault.search(
-        session,
-        _task_text(request.messages),
-        exclude=present,
-        max_tokens=room * 100 // ESTIMATE_FACTOR_PCT,
-    )
+    budget = room * 100 // ESTIMATE_FACTOR_PCT
+    anchor_text = _content_text(messages[index].content) if index is not None else ""
+    key = (session, f"{index}:{_sha(anchor_text)}")
+    passages = _RECALLED.get(key)
+    if passages is None or sum(
+        estimate_text_tokens(body) + 20 for _, body in passages
+    ) > max(budget, 0):
+        present = {digest for digest, _, _ in request_pieces(request)}
+        passages = vault.search(
+            session, _task_text(messages), exclude=present, max_tokens=budget
+        )
+        _RECALLED.pop(key, None)
+        _RECALLED[key] = passages
+        while len(_RECALLED) > _RECALLED_MAX:
+            _RECALLED.pop(next(iter(_RECALLED)))
     note = (
         "[FCC vault: parts of this conversation are kept verbatim outside your context window"
         + (f" ({replaced} block(s) above are placeholders)" if replaced else "")
@@ -499,25 +537,20 @@ def _with_recalled(
             f"### {label}\n{body}" for label, body in passages
         )
     note += "]"
-    messages = list(request.messages)
-    index = next(
-        (i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "user"),
-        None,
-    )
     if index is None:
         messages.append(Message(role="user", content=note))
     else:
         blocks = [*_blocks(messages[index]), {"type": "text", "text": note}]
         messages[index] = Message.model_validate({"role": "user", "content": blocks})
     logger.info(
-        "Context vault: session={} placeholders={} recalled_passages={} limit={}",
+        "Context vault: session={} placeholders={} recalled_passages={} anchor={} limit={}",
         session[:24],
         replaced,
         len(passages),
+        index,
         limit,
     )
     return request.model_copy(update={"messages": messages})
-
 
 def recall_tool() -> Tool:
     return Tool(
