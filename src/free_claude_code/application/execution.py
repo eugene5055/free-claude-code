@@ -81,8 +81,12 @@ class ProviderExecutor:
         log_raw_payloads: bool = False,
         request_headers: Mapping[str, str] | None = None,
         model_info_lookup: ModelInfoLookup | None = None,
+        local_providers: frozenset[str] = frozenset(),
     ) -> None:
         self._provider_resolver = provider_resolver
+        # Providers with a local base URL (provider_locality.local_provider_ids): a request for one of them never
+        # gets automatic cloud fallbacks.
+        self._local_providers = local_providers
         self._model_info_lookup = model_info_lookup or (lambda _provider, _model: None)
         self._token_counter = token_counter
         self._responses_token_counter = responses_token_counter
@@ -493,6 +497,7 @@ class ProviderExecutor:
             (ProviderModelCandidate(primary), *resolved.fallbacks),
             auto_fallbacks=auto_fallbacks and not resolved.same_model_only,
             request_id=request_id,
+            local_providers=self._local_providers,
         )
         gateway_model = resolved.original_model
         route_trace: dict[str, object] = {
@@ -740,6 +745,7 @@ def _ordered_candidates(
     *,
     auto_fallbacks: bool,
     request_id: str,
+    local_providers: frozenset[str] = frozenset(),
 ) -> tuple[list[tuple[int, ProviderModelCandidate]], set[str], list[tuple[int, ProviderModelCandidate]]]:
     """The order to try candidates in, the refs of the automatic ones, and the spare automatic ones.
 
@@ -747,6 +753,9 @@ def _ordered_candidates(
     now go last (soonest reset first), and then models of other providers that recently completed requests
     (provider_health.proven_models, up to three) are tried before them. The spare ones join only once a configured
     candidate is refused with a rate limit during this request (_insert_spare).
+
+    A request whose configured candidates are all local providers (local_providers) only gets local automatic
+    fallbacks: a local model never falls back to a cloud model by itself. Cloud requests may still use local ones.
     """
     now = time.time()
     entries = list(enumerate(configured))
@@ -758,7 +767,22 @@ def _ordered_candidates(
     automatic: set[str] = set()
     if auto_fallbacks:
         known = {candidate.target.provider_model_ref for candidate in configured}
-        for offset, (provider_id, provider_model) in enumerate(provider_health.proven_models(known, now)):
+        local_only = bool(configured) and all(
+            candidate.target.provider_id in local_providers for candidate in configured
+        )
+        if local_only:
+            proven = provider_health.proven_models(known, now, limit=sys.maxsize)
+            kept = [model for model in proven if model[0] in local_providers][: provider_health._AUTO_FALLBACKS]
+            skipped = [model for model in proven if model[0] not in local_providers]
+            if skipped:
+                logger.info(
+                    "Local request: request_id={} skips cloud automatic fallbacks {}",
+                    request_id,
+                    ", ".join(f"{provider_id}/{model}" for provider_id, model in skipped),
+                )
+        else:
+            kept = provider_health.proven_models(known, now)
+        for offset, (provider_id, provider_model) in enumerate(kept):
             ref = f"{provider_id}/{provider_model}"
             target = ProviderModelTarget(provider_id=provider_id, provider_model=provider_model, provider_model_ref=ref)
             pool.append((len(entries) + offset, ProviderModelCandidate(target)))

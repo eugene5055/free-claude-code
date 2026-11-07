@@ -18,6 +18,7 @@ from free_claude_code.api.response_streams import (
 from free_claude_code.application.errors import ApplicationError, InvalidRequestError
 from free_claude_code.application.execution import ProviderExecutor
 from free_claude_code.application.ports import ModelInfoLookup, ProviderResolver
+from free_claude_code.application.provider_locality import local_provider_ids
 from free_claude_code.application.routing import ModelRouter
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.diagnostics import safe_exception_message
@@ -52,6 +53,7 @@ class ResponsesHandler:
             provider_resolver,
             generation_id=generation_id,
             log_raw_payloads=settings.log_raw_api_payloads,
+            local_providers=local_provider_ids(settings),
             request_headers=request_headers,
             model_info_lookup=model_info_lookup,
         )

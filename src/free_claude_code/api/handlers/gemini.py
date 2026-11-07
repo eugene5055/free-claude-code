@@ -19,6 +19,7 @@ from free_claude_code.api.stream_frames import decimal_json_response
 from free_claude_code.application.errors import ApplicationError
 from free_claude_code.application.execution import ProviderExecutor
 from free_claude_code.application.ports import ModelInfoLookup, ProviderResolver
+from free_claude_code.application.provider_locality import local_provider_ids
 from free_claude_code.application.routing import ModelRouter
 from free_claude_code.application.web_tools.ports import WebToolsPort
 from free_claude_code.application.web_tools.request import extract_query
@@ -111,6 +112,7 @@ class GeminiHandler:
             request_headers=request_headers,
             model_info_lookup=model_info_lookup,
             log_raw_payloads=settings.log_raw_api_payloads,
+            local_providers=local_provider_ids(settings),
         )
 
     async def create(

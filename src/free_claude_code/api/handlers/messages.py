@@ -25,6 +25,7 @@ from free_claude_code.api.response_streams import (
 from free_claude_code.application.errors import ApplicationError
 from free_claude_code.application.execution import ProviderExecutor, TokenCounter
 from free_claude_code.application.ports import ModelInfoLookup, ProviderResolver
+from free_claude_code.application.provider_locality import local_provider_ids
 from free_claude_code.application.routing import (
     ModelRouter,
     RoutedMessagesRequest,
@@ -74,6 +75,7 @@ class MessagesHandler:
             token_counter=token_counter,
             generation_id=generation_id,
             log_raw_payloads=settings.log_raw_api_payloads,
+            local_providers=local_provider_ids(settings),
             request_headers=request_headers,
             model_info_lookup=model_info_lookup,
         )
