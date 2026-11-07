@@ -30,6 +30,16 @@ class CodexModel:
     default_reasoning_level: str | None
 
 
+def _codex_order(models: Sequence[CatalogModel]) -> list[CatalogModel]:
+    """List the user's own custom providers first, keeping each group's order.
+
+    The Codex desktop picker requests a single 100-model page and never asks for
+    the next one, so alphabetical order hid custom providers (local GPUs) behind
+    hundreds of cloud models.
+    """
+    return sorted(models, key=lambda model: not model.wire_slug.startswith("custom_"))
+
+
 def project_codex_models(models: Sequence[CatalogModel]) -> tuple[CodexModel, ...]:
     return tuple(
         CodexModel(
@@ -42,7 +52,7 @@ def project_codex_models(models: Sequence[CatalogModel]) -> tuple[CodexModel, ..
                 else None
             ),
         )
-        for priority, model in enumerate(models)
+        for priority, model in enumerate(_codex_order(models))
     )
 
 

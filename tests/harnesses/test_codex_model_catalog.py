@@ -207,3 +207,18 @@ def test_codex_catalog_projects_known_capabilities_and_preserves_unknown_default
     assert unknown["default_reasoning_summary"] == "none"
     assert unknown["context_window"] == 200000
     assert unknown["max_context_window"] == 200000
+
+
+def test_codex_catalog_lists_custom_providers_first() -> None:
+    # The Codex desktop picker reads only the first 100 models.
+    cloud = [f"anthropic/vendor/model-{i:03d}" for i in range(150)]
+    catalog = build_codex_model_catalog(
+        catalog_models_from_response(
+            _models_payload(*cloud, "custom_abc/duo-local-combined", "zai/glm")
+        )
+    )
+
+    slugs = _slugs(catalog)
+    assert slugs[0] == "custom_abc/duo-local-combined"
+    assert slugs[1:] == [*cloud, "zai/glm"]
+    assert [m["priority"] for m in _catalog_models(catalog)] == list(range(152))
