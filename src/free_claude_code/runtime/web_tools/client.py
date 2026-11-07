@@ -1,6 +1,7 @@
 """Outbound HTTP for web_search / web_fetch with operation-scoped resources."""
 
 import asyncio
+import os
 import socket
 from collections.abc import AsyncIterator
 from urllib.parse import urljoin, urlparse
@@ -146,26 +147,90 @@ class HTTPWebToolsClient:
     """Stateless adapter; each call owns its HTTP resources until completion."""
 
     async def search(self, query: str) -> list[WebSearchResult]:
-        async with (
-            httpx.AsyncClient(
-                timeout=_REQUEST_TIMEOUT_S,
-                follow_redirects=True,
-                headers=_WEB_TOOL_HTTP_HEADERS,
-            ) as client,
-            client.stream(
-                "GET",
-                "https://lite.duckduckgo.com/lite/",
-                params={"q": query},
-            ) as response,
-        ):
-            response.raise_for_status()
-            body_bytes = await _read_response_body_capped(
-                response, constants._MAX_WEB_FETCH_RESPONSE_BYTES
-            )
-        text = body_bytes.decode("utf-8", errors="replace")
-        parser = SearchResultParser()
-        parser.feed(text)
-        return parser.results[:_MAX_SEARCH_RESULTS]
+        """Search with one retry and an optional SearXNG/Brave fallback.
+
+        Set FCC_WEB_SEARCH_FALLBACK=searxng or FCC_WEB_SEARCH_FALLBACK=brave, plus
+        FCC_SEARXNG_BASE_URL / FCC_BRAVE_API_KEY, to enable a second backend when
+        DuckDuckGo-lite rate-limits or reshapes its markup.
+        """
+        attempts = int(os.environ.get("FCC_WEB_SEARCH_RETRIES", "1") or 1) + 1
+        last_exc: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                async with (
+                    httpx.AsyncClient(
+                        timeout=_REQUEST_TIMEOUT_S,
+                        follow_redirects=True,
+                        headers=_WEB_TOOL_HTTP_HEADERS,
+                    ) as client,
+                    client.stream(
+                        "GET",
+                        "https://lite.duckduckgo.com/lite/",
+                        params={"q": query},
+                    ) as response,
+                ):
+                    response.raise_for_status()
+                    body_bytes = await _read_response_body_capped(
+                        response, constants._MAX_WEB_FETCH_RESPONSE_BYTES
+                    )
+                text = body_bytes.decode("utf-8", errors="replace")
+                parser = SearchResultParser()
+                parser.feed(text)
+                if parser.results:
+                    return parser.results[:_MAX_SEARCH_RESULTS]
+                if not _web_search_fallback_enabled():
+                    return []
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+            except httpx.HTTPError as exc:
+                last_exc = exc
+            if attempt < attempts - 1:
+                await asyncio.sleep(0.5 * (attempt + 1))
+        return await self._search_fallback(query, last_exc)
+
+    async def _search_fallback(
+        self, query: str, last_exc: Exception | None
+    ) -> list[WebSearchResult]:
+        mode = os.environ.get("FCC_WEB_SEARCH_FALLBACK", "").strip().lower()
+        if mode == "searxng":
+            base = os.environ.get("FCC_SEARXNG_BASE_URL", "https://searx.be").rstrip("/")
+            try:
+                async with httpx.AsyncClient(
+                    timeout=_REQUEST_TIMEOUT_S, follow_redirects=True,
+                    headers=_WEB_TOOL_HTTP_HEADERS,
+                ) as client:
+                    r = await client.get(f"{base}/search", params={"q": query, "format": "json"})
+                    r.raise_for_status()
+                    data = r.json()
+                    return [
+                        WebSearchResult(title=r.get("title", "") or "", url=r.get("url", "") or "")
+                        for r in data.get("results", [])[:_MAX_SEARCH_RESULTS]
+                    ]
+            except Exception:
+                return []
+        if mode == "brave":
+            key = os.environ.get("FCC_BRAVE_API_KEY", "").strip()
+            if not key:
+                return []
+            try:
+                async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_S) as client:
+                    r = await client.get(
+                        "https://api.search.brave.com/res/v1/web/search",
+                        params={"q": query}, headers={"X-Subscription-Token": key},
+                    )
+                    r.raise_for_status()
+                    data = r.json()
+                    return [
+                        WebSearchResult(title=r.get("title", "") or "", url=r.get("url", "") or "")
+                        for r in data.get("web", {}).get("results", [{}])[:_MAX_SEARCH_RESULTS]
+                    ]
+            except Exception:
+                return []
+        return []
+
+
+def _web_search_fallback_enabled() -> bool:
+    return os.environ.get("FCC_WEB_SEARCH_FALLBACK", "").strip().lower() in {"searxng", "brave"}
 
     async def fetch(self, url: str, *, egress: WebFetchEgressPolicy) -> WebFetchResult:
         """Fetch URL with manual redirects; each hop is DNS-pinned to validated addresses."""

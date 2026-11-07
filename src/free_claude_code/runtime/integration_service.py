@@ -791,6 +791,10 @@ class IntegrationService:
                     self._codex_update, status, mask_when_unready=True
                 )
             if action == "refresh":
+                # Refresh must also regenerate the catalog JSON, not just the
+                # pointer: a newly added custom-provider model only reaches the
+                # Codex app after a full config commit, so bump the catalog
+                # revision here to force a republish.
                 existing = await self._read_status(
                     self._codex_update,
                     lambda url, token, ready: {
@@ -801,6 +805,7 @@ class IntegrationService:
                 )
                 if not existing["connected"]:
                     return {"changed": False}
+                self.provider_manager.bump_catalog_revision(reason="codex_refresh")
             while True:
                 catalog_version = (
                     await self.provider_manager.wait_for_catalog_file(wait)

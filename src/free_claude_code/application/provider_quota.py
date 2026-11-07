@@ -235,8 +235,8 @@ class ProviderQuotaService:
                             raw_limit=limit,
                         ))
                 return tuple(windows)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Provider quota parse failed: %s", type(exc).__name__)
         return ()
 
     async def _fetch_openai_quota(self, api_key: str, base_url: str) -> tuple[QuotaWindow, ...]:
@@ -270,8 +270,8 @@ class ProviderQuotaService:
                             raw_limit=limit,
                         ))
                 return tuple(windows)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Provider quota parse failed: %s", type(exc).__name__)
         return ()
 
     async def _fetch_google_quota(self, api_key: str, base_url: str) -> tuple[QuotaWindow, ...]:
@@ -310,8 +310,8 @@ class ProviderQuotaService:
                             raw_limit=limit,
                         ))
             return tuple(windows)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Provider quota parse failed: %s", type(exc).__name__)
         return ()
 
     async def _fetch_xkiro_quota(self, api_key: str, base_url: str) -> tuple[QuotaWindow, ...]:
@@ -345,8 +345,8 @@ class ProviderQuotaService:
                             raw_limit=limit,
                         ))
                 return tuple(windows)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Provider quota parse failed: %s", type(exc).__name__)
         return ()
 
     async def _fetch_vercel_quota(self, api_key: str, base_url: str) -> tuple[QuotaWindow, ...]:
@@ -371,8 +371,8 @@ class ProviderQuotaService:
                         raw_used=balance,
                         raw_limit=None,
                     ),)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Provider quota parse failed: %s", type(exc).__name__)
         return ()
 
     async def _fetch_deepseek_quota(self, api_key: str, base_url: str) -> tuple[QuotaWindow, ...]:
@@ -404,8 +404,8 @@ class ProviderQuotaService:
                             raw_limit=total,
                         ))
                 return tuple(windows)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Provider quota parse failed: %s", type(exc).__name__)
         return ()
 
     async def _fetch_kimi_quota(self, api_key: str, base_url: str) -> tuple[QuotaWindow, ...]:
@@ -430,8 +430,8 @@ class ProviderQuotaService:
                         raw_used=available,
                         raw_limit=None,
                     ),)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Provider quota parse failed: %s", type(exc).__name__)
         return ()
 
     async def _fetch_siliconflow_quota(self, api_key: str, base_url: str) -> tuple[QuotaWindow, ...]:
@@ -451,8 +451,8 @@ class ProviderQuotaService:
                     # SiliconFlow might have balance/quota info
                     # This is provider-specific - adjust based on actual response
                     pass
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Provider quota parse failed: %s", type(exc).__name__)
         return ()
 
     async def _fetch_wafer_quota(self, api_key: str, base_url: str) -> tuple[QuotaWindow, ...]:
@@ -471,8 +471,8 @@ class ProviderQuotaService:
                 if user_id:
                     # Wafer returns usage data
                     pass
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Provider quota parse failed: %s", type(exc).__name__)
         return ()
 
     async def _fetch_groq_quota(self, api_key: str, base_url: str) -> tuple[QuotaWindow, ...]:
@@ -615,8 +615,8 @@ class ProviderQuotaService:
                                 return tuple(windows)
                     except Exception:
                         continue
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Provider quota parse failed: %s", type(exc).__name__)
         return ()
 
     async def _fetch_cloudflare_quota(self, api_key: str, base_url: str) -> tuple[QuotaWindow, ...]:
@@ -657,8 +657,8 @@ class ProviderQuotaService:
                         ))
                 if windows:
                     return tuple(windows)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Provider quota parse failed: %s", type(exc).__name__)
         return ()
 
     async def _fetch_zai_quota(self, api_key: str, base_url: str) -> tuple[QuotaWindow, ...]:
@@ -713,8 +713,8 @@ class ProviderQuotaService:
                                 return tuple(windows)
                     except Exception:
                         continue
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Provider quota parse failed: %s", type(exc).__name__)
         return ()
 
     async def _fetch_alibaba_quota(self, api_key: str, base_url: str) -> tuple[QuotaWindow, ...]:
@@ -753,8 +753,8 @@ class ProviderQuotaService:
                                 return tuple(windows)
                     except Exception:
                         continue
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Provider quota parse failed: %s", type(exc).__name__)
         return ()
 
     async def _fetch_nvidia_nim_quota(self, api_key: str, base_url: str) -> tuple[QuotaWindow, ...]:
@@ -793,8 +793,8 @@ class ProviderQuotaService:
                                 return tuple(windows)
                     except Exception:
                         continue
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Provider quota parse failed: %s", type(exc).__name__)
         return ()
 
     async def _fetch_generic_quota(self, provider_id: str, api_key: str, base_url: str) -> tuple[QuotaWindow, ...]:

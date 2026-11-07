@@ -591,6 +591,18 @@ class ProviderRuntimeManager:
         if self._catalog_changed is not None and not self._closing:
             self._catalog_changed()
 
+    def bump_catalog_revision(self, *, reason: str = "admin") -> None:
+        """Force a catalog republish (e.g. after a newly added model).
+
+        Bumping the revision changes the publication version
+        (generation_id, catalog_revision), so _publish_catalog rewrites the
+        JSON file even when no generation change has occurred.
+        """
+        if self._closing or not self._current.catalog_started:
+            return
+        self._catalog_revision += 1
+        self._catalog_updated()
+
     def _request_publication(self) -> asyncio.Task[None]:
         self._current.file_state = "starting"
         if self._publication_task is None or self._publication_task.done():
