@@ -151,7 +151,7 @@ class HTTPWebToolsClient:
 
         Set FCC_WEB_SEARCH_FALLBACK=searxng or FCC_WEB_SEARCH_FALLBACK=brave, plus
         FCC_SEARXNG_BASE_URL / FCC_BRAVE_API_KEY, to enable a second backend when
-        DuckDuckGo-lite rate-limits or reshapes its markup.
+        DuckDuckGo-lite rate-limits or reshapes its markup. Default unchanged if unset.
         """
         attempts = int(os.environ.get("FCC_WEB_SEARCH_RETRIES", "1") or 1) + 1
         last_exc: Exception | None = None
@@ -228,10 +228,6 @@ class HTTPWebToolsClient:
                 return []
         return []
 
-
-def _web_search_fallback_enabled() -> bool:
-    return os.environ.get("FCC_WEB_SEARCH_FALLBACK", "").strip().lower() in {"searxng", "brave"}
-
     async def fetch(self, url: str, *, egress: WebFetchEgressPolicy) -> WebFetchResult:
         """Fetch URL with manual redirects; each hop is DNS-pinned to validated addresses."""
         current_url = url
@@ -301,3 +297,7 @@ def _web_search_fallback_enabled() -> bool:
             media_type="text/plain",
             data=data[:_MAX_FETCH_CHARS],
         )
+
+
+def _web_search_fallback_enabled() -> bool:
+    return os.environ.get("FCC_WEB_SEARCH_FALLBACK", "").strip().lower() in {"searxng", "brave"}
