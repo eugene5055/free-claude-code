@@ -138,6 +138,16 @@ def apply_openai_chat_body_policy(
         for key in policy.unsupported_body_keys:
             extra_body.pop(key, None)
 
+    # A request with no output budget (e.g. a Responses call without
+    # max_output_tokens) would otherwise run unbounded on servers like
+    # llama.cpp (n_predict -1) and hold a slot until the context fills.
+    if (
+        policy.default_max_tokens is not None
+        and body.get("max_tokens") is None
+        and body.get("max_completion_tokens") is None
+    ):
+        body["max_tokens"] = policy.default_max_tokens
+
     if policy.max_tokens_field == "max_completion_tokens":
         _normalize_max_completion_tokens(body)
 

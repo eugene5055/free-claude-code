@@ -65,6 +65,10 @@ from free_claude_code.providers.openai_chat import (
 from free_claude_code.providers.openai_client import OpenAIRequestClient
 from free_claude_code.providers.openai_responses import OpenAIResponsesTransport
 
+# Output budget for custom Chat Completions requests that name none, so a
+# runaway generation on a local server cannot hold its slot indefinitely.
+CUSTOM_DEFAULT_MAX_OUTPUT_TOKENS = 32768
+
 
 def _reasoning_encoder(name: str) -> ReasoningEncoder:
     efforts = tuple(
@@ -177,6 +181,7 @@ class CustomProvider(BaseProvider):
                     OpenAIChatRequestPolicy(
                         definition.provider_id,
                         ReasoningReplayMode(definition.reasoning_history_format),
+                        default_max_tokens=CUSTOM_DEFAULT_MAX_OUTPUT_TOKENS,
                     ),
                     _reasoning_encoder(definition.reasoning_format),
                     reasoning_delta_fallback_field="reasoning",
