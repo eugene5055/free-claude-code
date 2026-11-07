@@ -1,20 +1,17 @@
 """Custom endpoint resource ownership using FCC's existing wire transports."""
 
-import sqlite3
 from collections.abc import AsyncIterator, Mapping
 
 import httpx
 import httpx2
 from loguru import logger
 
-from free_claude_code.application import context_vault
 from free_claude_code.application.errors import InvalidRequestError
 from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.config.custom_providers import CustomProviderDefinition
 from free_claude_code.core.anthropic import (
     MessagesRequest,
     ReasoningReplayMode,
-    get_token_count,
 )
 from free_claude_code.core.chat_completions.request import ChatRequest
 from free_claude_code.core.gemini import GeminiRequest
@@ -27,8 +24,6 @@ from free_claude_code.core.reasoning import (
     ReasoningEffort,
     ReasoningPolicy,
 )
-from free_claude_code.core.anthropic.tokens import get_token_count
-from free_claude_code.core.safety_classifier import is_safety_classifier
 from free_claude_code.core.stream_recovery import ContinuationSeed
 from free_claude_code.providers.admission import (
     ProviderAdmissionController,
@@ -267,9 +262,8 @@ class CustomProvider(BaseProvider):
         model_info: ProviderModelInfo | None = None,
         continuation: ContinuationSeed | None = None,
     ) -> AsyncIterator[str]:
-        """Stream a reply. With a declared window, nothing the conversation held is lost (context_vault): every
-        request is archived; one no window holds is fitted by the roomiest sibling (FIT) instead of refused, and
-        after Claude Code compacted, the model can recall what it dropped."""
+        """Stream a reply. A prompt the served window cannot hold is refused as "prompt is too long" (Anthropic's
+        wording), so the client compacts its conversation and retries."""
         limit = self._context_limit(request.max_tokens)
         options = {
             "request_id": request_id,
@@ -277,62 +271,9 @@ class CustomProvider(BaseProvider):
             "reasoning": reasoning,
             "model_info": model_info,
         }
-        if limit is None:
-            return self._stream_raw(request, input_tokens, continuation=continuation, **options)
-        if is_safety_classifier(request):
-            return self._stream_classifier(
-                request, input_tokens, limit, continuation=continuation, **options
-            )
-        fitting = context_vault.FIT.get()
-        if not fitting:
+        if limit is not None:
             self._check_context_window(input_tokens, request.max_tokens)
-        vault = context_vault.default_vault()
-        session = context_vault.session_key(request, request_headers)
-        try:
-            present = vault.archive(session, request)
-            recalling = fitting or context_vault.needs_vault(request, vault, session, present)
-        except sqlite3.Error as error:
-            logger.warning("Context vault unavailable: {}", error)
-            if fitting:
-                raise context_window_exceeded_provider_failure(
-                    f"prompt is too long: {input_tokens} tokens > {limit} maximum (context vault unavailable)"
-                ) from error
-            recalling = False
-        if not recalling:
-            return self._stream_raw(request, input_tokens, continuation=continuation, **options)
-
-        def open_round(prepared: MessagesRequest, number: int) -> AsyncIterator[str]:
-            tokens = get_token_count(prepared.messages, prepared.system, prepared.tools)
-            return self._stream_raw(
-                prepared, tokens, continuation=continuation if number == 1 else None, **options
-            )
-
-        return context_vault.recall_stream(
-            request, vault=vault, session=session, limit=limit, open_round=open_round
-        )
-
-    def _stream_classifier(
-        self,
-        request: MessagesRequest,
-        input_tokens: int,
-        limit: int,
-        *,
-        continuation: ContinuationSeed | None,
-        **options,
-    ) -> AsyncIterator[str]:
-        """Claude's auto-mode safety classifier sees the transcript Claude Code sent: never archived, never
-        vault-fitted, no recall tool. Too long here moves it to a roomier sibling; with none left (FIT), only old
-        tool-call entries are dropped, never the user's words (context_vault.fit_classifier)."""
-        if not context_vault.FIT.get():
-            self._check_context_window(input_tokens, request.max_tokens)
-            return self._stream_raw(request, input_tokens, continuation=continuation, **options)
-        trimmed = context_vault.fit_classifier(request, limit)
-        if trimmed is None:
-            raise context_window_exceeded_provider_failure(
-                f"prompt is too long: {input_tokens} tokens > {limit} maximum (safety classifier)"
-            )
-        tokens = get_token_count(trimmed.messages, trimmed.system, trimmed.tools)
-        return self._stream_raw(trimmed, tokens, continuation=continuation, **options)
+        return self._stream_raw(request, input_tokens, continuation=continuation, **options)
 
     def _stream_raw(
         self,

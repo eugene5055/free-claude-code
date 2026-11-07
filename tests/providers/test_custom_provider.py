@@ -838,36 +838,3 @@ async def test_context_window_unset_never_refuses():
 async def test_context_window_rejects_tiny_value():
     with pytest.raises(ValueError):
         definition(context_window_tokens=100)
-
-
-@pytest.mark.asyncio
-async def test_context_window_fit_mode_sends_with_the_vault_instead_of_refusing(tmp_path, monkeypatch):
-    from free_claude_code.application import context_vault
-
-    monkeypatch.setenv("FCC_CONTEXT_VAULT", str(tmp_path / "vault.sqlite3"))
-    requests = []
-
-    def reply(request):
-        requests.append(request)
-        return httpx2.Response(
-            200, text=completion("openai_chat"), headers={"content-type": "text/event-stream"}
-        )
-
-    instance = provider(
-        definition(api_format="openai_chat", context_window_tokens=65536),
-        openai_handler=reply,
-    )
-    request = MessagesRequest(
-        model="m", max_tokens=32000, messages=[{"role": "user", "content": "Hello"}]
-    )
-    token = context_vault.FIT.set(True)
-    try:
-        stream = instance.stream_messages(request, input_tokens=50000)
-    finally:
-        context_vault.FIT.reset(token)
-    try:
-        assert [event async for event in stream]
-        assert len(requests) == 1
-        assert context_vault.RECALL_TOOL in requests[0].content.decode()
-    finally:
-        await instance.cleanup()

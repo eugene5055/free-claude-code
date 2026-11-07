@@ -25,7 +25,7 @@ from free_claude_code.core.openai_responses import (
     estimate_responses_input_tokens,
 )
 from free_claude_code.core.reasoning import ReasoningPolicy
-from free_claude_code.application import context_vault, kimi_plan, model_usability, provider_health
+from free_claude_code.application import kimi_plan, model_usability, provider_health
 from free_claude_code.application.provider_ratings import record_outcome, _kind_for_model
 from free_claude_code.core.request_outcomes import record_request_route
 from free_claude_code.core.stream_delivery import current_stream_delivery
@@ -543,10 +543,6 @@ class ProviderExecutor:
             delivery = current_stream_delivery()
             continuation: ContinuationSeed | None = None
             configured_failure: ExecutionFailure | None = None
-            # (window maximum, open index, candidate) of the roomiest "prompt is too long" refusal, and the position
-            # where that candidate runs again to fit the prompt itself (context_vault) instead of refusing it.
-            roomiest: tuple[int, int, ProviderModelCandidate] | None = None
-            fitting_position: int | None = None
             for position, (index, candidate) in enumerate(candidates):
                 target = candidate.target
                 record_request_route(target.provider_id, target.provider_model)
@@ -555,7 +551,6 @@ class ProviderExecutor:
                 candidate_committed = False
                 candidate_failure: ExecutionFailure | None = None
                 try:
-                    fit_token = context_vault.FIT.set(True) if position == fitting_position else None
                     try:
                         provider_stream = await open_candidate(
                             index, candidate, continuation
@@ -573,10 +568,6 @@ class ProviderExecutor:
                             message=f"Automatic fallback unavailable: {type(error).__name__}",
                             retryable=True,
                         )
-
-                    finally:
-                        if fit_token is not None:
-                            context_vault.FIT.reset(fit_token)
 
                     if provider_stream is None and candidate_failure is None:
                         raise TypeError(
@@ -654,13 +645,6 @@ class ProviderExecutor:
                         spare = []
                 if target.provider_model_ref not in automatic:
                     configured_failure = _roomiest_failure(configured_failure, candidate_failure)
-                if (
-                    candidate_failure.kind is FailureKind.CONTEXT_WINDOW_EXCEEDED
-                    and position != fitting_position
-                ):
-                    room = _context_maximum(candidate_failure)
-                    if room and (roomiest is None or room > roomiest[0]):
-                        roomiest = (room, index, candidate)
                 recovery_action = "continue" if continuation is not None else "restart"
                 recovery_reason = "no_candidate_output"
                 context = candidate_failure.stream_context
@@ -683,21 +667,9 @@ class ProviderExecutor:
                     recovery_action = assessment.action.value
                     recovery_reason = assessment.reason
                 if position + 1 >= len(candidates):
-                    final_failure = configured_failure or candidate_failure
-                    if (
-                        wire_api == "messages"
-                        and fitting_position is None
-                        and roomiest is not None
-                        and not candidate_committed
-                        and final_failure.kind is FailureKind.CONTEXT_WINDOW_EXCEEDED
-                    ):
-                        # No window holds the prompt: the roomiest candidate fits it without losing anything
-                        # (context_vault) instead of refusing, which Claude Code cannot recover from within one turn.
-                        candidates.append((roomiest[1], roomiest[2]))
-                        fitting_position = len(candidates) - 1
-                    else:
-                        # When the automatic fallbacks failed too, report what the configured model said.
-                        raise final_failure
+                    # When the automatic fallbacks failed too, report what the configured model said; a prompt no
+                    # window holds is refused as too long, so the client compacts and retries.
+                    raise configured_failure or candidate_failure
                 if delivery is not None and continuation is not None:
                     delivery.begin_continuation()
                 next_target = candidates[position + 1][1].target
