@@ -106,6 +106,7 @@ def build_provider_config(
         proxy=proxy,
         log_raw_sse_events=settings.log_raw_sse_events,
         log_api_error_tracebacks=settings.log_api_error_tracebacks,
+        repair_tool_calls=settings.repair_tool_calls,
     )
 
 
@@ -127,4 +128,5 @@ def build_custom_provider_config(
         http_connect_timeout=settings.http_connect_timeout,
         log_raw_sse_events=settings.log_raw_sse_events,
         log_api_error_tracebacks=settings.log_api_error_tracebacks,
+        repair_tool_calls=settings.repair_tool_calls,
     )

@@ -53,7 +53,9 @@ def _validate_model_ref(value: str) -> str:
     return value
 
 
-def parse_reasoning_provider_policies(value: str | None) -> dict[str, ReasoningPreference]:
+def parse_reasoning_provider_policies(
+    value: str | None,
+) -> dict[str, ReasoningPreference]:
     """Parse ``provider=preference`` pairs; INHERIT is not a root choice."""
     result: dict[str, ReasoningPreference] = {}
     for item in (value or "").split(","):
@@ -701,6 +703,11 @@ class Settings(BaseModel):
     enable_web_server_tools: bool = Field(
         default=True, validation_alias="ENABLE_WEB_SERVER_TOOLS"
     )
+    # Retry a provider response once when a tool call omits schema-required
+    # arguments (or passes non-object arguments), before the client sees it.
+    repair_tool_calls: bool = Field(
+        default=True, validation_alias="FCC_REPAIR_TOOL_CALLS"
+    )
     # Comma-separated URL schemes allowed for web_fetch (default: http,https).
     web_fetch_allowed_schemes: NonEmptyString = Field(
         default="http,https", validation_alias="WEB_FETCH_ALLOWED_SCHEMES"
@@ -837,9 +844,9 @@ class Settings(BaseModel):
 
     def provider_reasoning_policy(self, provider_id: str) -> ReasoningPreference:
         """Return the provider override, else the root reasoning policy."""
-        return parse_reasoning_provider_policies(
-            self.reasoning_provider_policies
-        ).get(provider_id, self.reasoning_policy)
+        return parse_reasoning_provider_policies(self.reasoning_provider_policies).get(
+            provider_id, self.reasoning_policy
+        )
 
     @field_validator("whisper_device")
     @classmethod

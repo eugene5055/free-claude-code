@@ -72,6 +72,16 @@ class OpenAIToolCallCollector:
         if extra_content:
             state.extra_content = extra_content
 
+    def raw_calls(self) -> tuple[tuple[str, str], ...]:
+        """Return ``(wire_name, arguments)`` for every collected call in order."""
+        return tuple(
+            (
+                self._calls[index].name.strip(),
+                "".join(self._calls[index].argument_parts),
+            )
+            for index in sorted(self._calls, key=self._identities.order_key)
+        )
+
     def completed_calls(
         self,
         schemas: dict[str, ToolSchema],

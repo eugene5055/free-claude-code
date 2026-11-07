@@ -234,6 +234,7 @@ class GitHubCopilotProvider(BaseProvider):
                 read_timeout_s=self._config.http_read_timeout,
                 log_raw_sse_events=self._config.log_raw_sse_events,
                 log_api_error_tracebacks=self._config.log_api_error_tracebacks,
+                repair_tool_calls=self._config.repair_tool_calls,
                 admission=self._admission,
                 history_cache=self._history_cache,
                 client=self._client,

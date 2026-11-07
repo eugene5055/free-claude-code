@@ -82,6 +82,7 @@ REASONING_FIELDS = (
 )
 WEB_FIELDS = (
     "enable_web_server_tools",
+    "repair_tool_calls",
     "web_fetch_allowed_schemes",
     "web_fetch_allow_private_networks",
 )

@@ -104,6 +104,7 @@ class OpenCodeProvider(BaseProvider):
             read_timeout_s=config.http_read_timeout,
             log_raw_sse_events=config.log_raw_sse_events,
             log_api_error_tracebacks=config.log_api_error_tracebacks,
+            repair_tool_calls=config.repair_tool_calls,
         )
         self._opencode_profile = profile
         self._catalog = OpenCodeCatalog(

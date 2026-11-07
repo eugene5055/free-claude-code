@@ -134,6 +134,7 @@ from .stream_output import (
     ResponsesChatStreamOutput,
 )
 from .tool_call_identity import AmbiguousToolCallIdentityError
+from .tool_call_repair import ToolCallRepairGuard, tool_call_repair_body
 from .tool_calls import (
     CompletedOpenAIToolCall,
     OpenAIToolCallAssembler,
@@ -552,6 +553,7 @@ class OpenAIChatTransport:
         endpoint_transport: httpx2.AsyncBaseTransport | None = None,
         api_key_provider: OpenAIAsyncCredentialProvider | None = None,
         validate_prepared_body: PreparedBodyValidator | None = None,
+        repair_tool_calls: bool = True,
     ) -> None:
         self._client = client
         self._admission = admission
@@ -568,6 +570,7 @@ class OpenAIChatTransport:
         self._api_key_provider = api_key_provider
         self._validate_prepared_body = validate_prepared_body
         self._model_output_caps: dict[str, int] = {}
+        self._repair_tool_calls = repair_tool_calls
 
     def _log_stream_transport_error(
         self,
@@ -1134,6 +1137,7 @@ class OpenAIChatTransport:
             endpoint_context=endpoint_context,
             extra_headers=extra_headers or {},
             continuation=continuation,
+            repair_skip_tool_names=translated.tool_adapter.custom_tool_names(),
         )
         return runner.run()
 
@@ -1160,9 +1164,12 @@ class _OpenAIChatStreamRunner:
         continuation: ContinuationSeed | None = None,
         call_replay: tuple[CallReplay, ...] = (),
         native_chat: bool = False,
+        repair_skip_tool_names: frozenset[str] = frozenset(),
     ) -> None:
         self._transport = transport
         self._native_chat = native_chat
+        self._repair_skip_tool_names = repair_skip_tool_names
+        self._tool_call_repaired = False
         self._body = body
         self._continuation = continuation
         self._call_replay = call_replay
@@ -1262,6 +1269,11 @@ class _OpenAIChatStreamRunner:
         while True:
             assembler = self._new_stream_assembler(output_reasoning=output_reasoning)
             source = SourceRecoveryState(execution, previous=source)
+            guard = (
+                self._new_repair_guard()
+                if operation_kind is ProviderOperationKind.GENERATION
+                else None
+            )
 
             def observe_chunk(
                 chunk: Any,
@@ -1342,7 +1354,23 @@ class _OpenAIChatStreamRunner:
                         for event in assembler.start_events():
                             for out_event in hold_event(event):
                                 yield out_event
-                        for event in assembler.feed(chunk):
+                        admitted = (chunk,) if guard is None else guard.admit(chunk)
+                        for item in admitted:
+                            for event in assembler.feed(item):
+                                for out_event in hold_event(event):
+                                    yield out_event
+
+                if guard is not None:
+                    settled = await self._settle_held_tool_calls(
+                        guard,
+                        body=body,
+                        scope=scope,
+                        assembler=assembler,
+                        request_recovery=request_recovery,
+                    )
+                    guard = None
+                    for item in settled:
+                        for event in assembler.feed(item):
                             for out_event in hold_event(event):
                                 yield out_event
 
@@ -1354,6 +1382,13 @@ class _OpenAIChatStreamRunner:
             except asyncio.CancelledError, GeneratorExit:
                 raise
             except Exception as error:
+                if guard is not None:
+                    # Failure handling below must see the same output as an
+                    # unguarded stream, including any partial tool call.
+                    for event in self._release_held_tool_calls(guard, assembler):
+                        for out_event in hold_event(event):
+                            yield out_event
+                    guard = None
                 if scope is not None:
                     corrected_body = await request_recovery.retry_request(
                         error,
@@ -1510,6 +1545,182 @@ class _OpenAIChatStreamRunner:
                 yield out_event
         for event in recovery.flush():
             yield event
+
+    def _new_repair_guard(self) -> ToolCallRepairGuard | None:
+        """Return a tool-call guard when this request may still be repaired."""
+        if (
+            self._tool_call_repaired
+            or self._native_chat
+            or not self._tool_schemas
+            or not self._transport._repair_tool_calls
+        ):
+            return None
+        return self._repair_guard()
+
+    def _repair_guard(self) -> ToolCallRepairGuard:
+        return ToolCallRepairGuard(
+            schemas=self._tool_schemas,
+            tool_names=self._tool_names,
+            argument_aliases=self._tool_argument_aliases,
+            skip_names=self._repair_skip_tool_names,
+        )
+
+    def _release_held_tool_calls(
+        self,
+        guard: ToolCallRepairGuard,
+        assembler: _OpenAIChatStreamAssembler,
+    ) -> Iterator[str]:
+        """Feed held chunks after an upstream failure, never masking the failure."""
+        try:
+            for item in guard.release():
+                yield from assembler.feed(item)
+        except Exception as error:
+            logger.debug(
+                "TOOL_CALL_REPAIR: dropped held chunks after failure: {}",
+                type(error).__name__,
+            )
+
+    async def _settle_held_tool_calls(
+        self,
+        guard: ToolCallRepairGuard,
+        *,
+        body: dict[str, Any],
+        scope: ProviderAttemptScope | None,
+        assembler: _OpenAIChatStreamAssembler,
+        request_recovery: RequestRecovery,
+    ) -> tuple[Any, ...]:
+        """Return the chunks that finish this response, repairing it at most once.
+
+        The held tool calls are validated only for required-property presence
+        and object-ness. A defective response is retried once with a corrective
+        note; the retry's chunks replace the held ones even if they are still
+        defective. When the retry cannot run or fails, the original held
+        chunks are returned unchanged.
+        """
+        if (
+            not guard.holding
+            or guard.finish_reason is None
+            or is_context_window_finish_reason(guard.finish_reason)
+        ):
+            return guard.release()
+        defects = guard.defects()
+        if not defects:
+            return guard.release()
+        tag = self._transport._provider_name
+        req_tag = f" request_id={self._request_id}" if self._request_id else ""
+        summary = "; ".join(
+            f"{defect.name} "
+            + ("arguments not an object" if defect.not_object else "missing")
+            + (f" {list(defect.missing)}" if defect.missing else "")
+            for defect in defects
+        )
+        if not request_recovery.execution.can_attempt:
+            logger.warning(
+                "TOOL_CALL_REPAIR: {}{} defective tool call ({}) but no attempt "
+                "budget remains; passing it through",
+                tag,
+                req_tag,
+                summary,
+            )
+            return guard.release()
+        self._tool_call_repaired = True
+        logger.warning(
+            "TOOL_CALL_REPAIR: {}{} defective tool call ({}); retrying once",
+            tag,
+            req_tag,
+            summary,
+        )
+        if scope is not None:
+            # Release the finished attempt's slot before opening the retry.
+            await scope.aclose(active_error=None)
+        repair_body = tool_call_repair_body(body, defects, prior_text=guard.prior_text)
+        try:
+            chunks, origin = await self._collect_tool_repair_chunks(
+                repair_body, request_recovery
+            )
+        except Exception as error:
+            logger.warning(
+                "TOOL_CALL_REPAIR: {}{} retry failed ({}); passing the original "
+                "tool call through",
+                tag,
+                req_tag,
+                type(error).__name__,
+            )
+            return guard.release()
+        check = self._repair_guard()
+        for chunk in chunks:
+            check.admit(chunk)
+        if check.finish_reason is None or is_context_window_finish_reason(
+            check.finish_reason
+        ):
+            logger.warning(
+                "TOOL_CALL_REPAIR: {}{} retry ended without a usable finish; "
+                "passing the original tool call through",
+                tag,
+                req_tag,
+            )
+            return guard.release()
+        if remaining := check.defects():
+            logger.warning(
+                "TOOL_CALL_REPAIR: {}{} retry is still defective ({}); passing "
+                "it through unchanged",
+                tag,
+                req_tag,
+                "; ".join(defect.name for defect in remaining),
+            )
+        else:
+            logger.info("TOOL_CALL_REPAIR: {}{} retry repaired the call", tag, req_tag)
+        guard.release()
+        if origin is not None:
+            assembler.output.replay_origin = origin
+        return tuple(chunks)
+
+    async def _collect_tool_repair_chunks(
+        self,
+        body: dict[str, Any],
+        request_recovery: RequestRecovery,
+    ) -> tuple[list[Any], ReplayOrigin | None]:
+        """Buffer one complete repair response without emitting anything."""
+        origin: ReplayOrigin | None = None
+
+        def bind_origin(value: ReplayOrigin) -> None:
+            nonlocal origin
+            origin = value
+
+        scope: ProviderAttemptScope | None = None
+        try:
+            stream, _body, attempt, _sent_body = await self._transport._create_stream(
+                body,
+                request_recovery,
+                ProviderOperationKind.TOOL_REPAIR,
+                corrections=RequestCorrections("chat"),
+                endpoint=self._endpoint,
+                request_client=self._request_client,
+                extra_headers=self._extra_headers,
+                on_origin=bind_origin,
+            )
+            scope = ProviderAttemptScope(
+                attempt,
+                provider_name=self._transport._provider_name,
+                request_id=self._request_id,
+            )
+            stream = scope.retain(stream)
+            chunks: list[Any] = []
+            async for chunk in stream:
+                if not scope.attempt.accepted:
+                    await scope.attempt.accept()
+                chunks.append(chunk)
+            return chunks, origin
+        except Exception as error:
+            if scope is not None and not scope.attempt.accepted:
+                await scope.attempt.fail(
+                    error,
+                    provider_failure_override=self._transport._behavior.failure_override,
+                )
+            raise
+        finally:
+            if scope is not None:
+                await scope.aclose(active_error=sys.exception())
 
     async def _resolve_attempt_failure(
         self,

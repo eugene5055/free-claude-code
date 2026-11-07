@@ -416,6 +416,14 @@ class ResponsesToolAdapter:
             raise ResponsesConversionError("Ambiguous tool name returned by provider.")
         return next(iter(candidates)) if len(candidates) == 1 else None
 
+    def custom_tool_names(self) -> frozenset[str]:
+        """Return Chat wire names that carry freeform custom-tool input."""
+        return frozenset(
+            wire_name
+            for identity, wire_name in self._wire_names.items()
+            if identity.kind == "custom"
+        )
+
     def restore_item(self, value: JsonValue) -> JsonValue:
         if not isinstance(value, dict):
             return value

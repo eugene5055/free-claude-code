@@ -387,6 +387,18 @@ _NON_PROVIDER_FIELDS: tuple[ConfigFieldSpec, ...] = (
         session_sensitive=True,
     ),
     ConfigFieldSpec(
+        "FCC_REPAIR_TOOL_CALLS",
+        "Repair Tool Calls",
+        "runtime",
+        "boolean",
+        settings_attr="repair_tool_calls",
+        advanced=True,
+        description=(
+            "Retry a model response once when a tool call is missing arguments "
+            "its schema requires, before the client sees the call."
+        ),
+    ),
+    ConfigFieldSpec(
         "ENABLE_WEB_SERVER_TOOLS",
         "Web Server Tools",
         "web_tools",
