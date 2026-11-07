@@ -8,6 +8,11 @@ from free_claude_code.application.errors import (
     InvalidRequestError,
     UnknownProviderError,
 )
+from free_claude_code.application.provider_ratings import (
+    _configured_providers,
+    _kind_for_model,
+    best,
+)
 from free_claude_code.config.model_refs import (
     is_retired_model_ref,
     parse_model_name,
@@ -33,12 +38,6 @@ from free_claude_code.core.gemini import GeminiRequest
 from free_claude_code.core.openai_responses import OpenAIResponsesRequest
 from free_claude_code.core.reasoning import ReasoningPolicy
 from free_claude_code.core.trace import trace_event
-
-from free_claude_code.application.provider_ratings import (
-    best,
-    _kind_for_model,
-    _configured_providers,
-)
 
 from . import model_groups, model_usability
 from .reasoning import (
@@ -179,7 +178,7 @@ class ModelRouter:
             logger.debug(
                 "MODEL MAPPING: '{}' -> '{}'",
                 claude_model_name,
-                primary.provider_model_ref,
+                primary.provider_model,
             )
         fallbacks = self._fallback_targets(primary)
         if primary != configured and all(c.target != configured for c in fallbacks):
@@ -213,7 +212,10 @@ class ModelRouter:
 
     def _group_route(self, model_name: str) -> ResolvedModelRoute | None:
         """`anthropic/fcc/<name>`: the model <name> on whichever provider serves it (model_groups)."""
-        decoded = decode_gateway_model_id(model_name) if "/" in model_name else None
+        try:
+            decoded = decode_gateway_model_id(model_name) if "/" in model_name else None
+        except ValueError:
+            return None  # not a valid gateway ID; the direct route reports it as an invalid request
         if decoded is None or decoded.provider_id != model_groups.GROUP_PROVIDER:
             return None
         name = model_groups.canonical_name(decoded.provider_model)

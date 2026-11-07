@@ -4,7 +4,6 @@ One builder feeds both the ``/usage`` web page (JSON) and the ``/fcc-usage``
 Claude Code command (plain text laid out like Claude's own Usage tab).
 """
 
-from __future__ import annotations
 
 import asyncio
 import os

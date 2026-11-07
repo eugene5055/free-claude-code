@@ -12,7 +12,12 @@ from .extra_body import (
     validate_extra_body_does_not_override_reasoning_fields,
 )
 from .native_output import NativeChatStreamOutput
-from .profiles import OPENAI_CHAT_PROFILES, OpenAIChatProfile, OpenAIModelListing
+from .profiles import (
+    OPENAI_CHAT_PROFILES,
+    OpenAIChatProfile,
+    OpenAIModelListing,
+    drop_empty_assistant_turns,
+)
 from .provider import OpenAIChatProvider
 from .reasoning import (
     NO_REASONING,
@@ -82,6 +87,7 @@ __all__ = [
     "build_openai_chat_request_body",
     "create_chat_client",
     "create_openai_chat_provider",
+    "drop_empty_assistant_turns",
     "openai_v1_base_url",
     "usage_int",
     "validate_extra_body_does_not_override_canonical_fields",

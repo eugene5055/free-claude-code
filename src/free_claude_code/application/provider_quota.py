@@ -1,5 +1,4 @@
 """Provider quota tracking - queries each provider's quota API."""
-from __future__ import annotations
 
 import asyncio
 import logging

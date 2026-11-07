@@ -11,7 +11,6 @@ fastest first by measured time to first output; a provider not timed yet goes fi
 (_EXPLORE) so it gets measured, and otherwise after the timed ones.
 """
 
-from __future__ import annotations
 
 import random
 from collections.abc import Collection, Iterable

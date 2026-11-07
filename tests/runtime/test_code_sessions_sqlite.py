@@ -568,7 +568,7 @@ async def test_version_one_database_gains_mode_without_losing_history(
         assert saved_run is not None and saved_run.mode == "config"
         assert await store.items(session.id, None, None) == items
         with closing(sqlite3.connect(tmp_path / "code.db")) as connection:
-            assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
             with pytest.raises(sqlite3.IntegrityError):
                 connection.execute("UPDATE code_sessions SET mode = 'unknown'")
             with pytest.raises(sqlite3.IntegrityError):
@@ -598,7 +598,7 @@ async def test_version_two_database_gains_nullable_context_usage(
         await store.start()
         assert (await store.get_session(session.id)).context_used_tokens is None
         with closing(sqlite3.connect(tmp_path / "code.db")) as connection:
-            assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
             column = next(
                 row
                 for row in connection.execute("PRAGMA table_info(code_sessions)")
@@ -965,7 +965,7 @@ async def test_legacy_prompts_migrate_once_to_run_ends_without_resequencing(
             )
             assert saved[prompt.id] == expected
         with closing(sqlite3.connect(path)) as connection:
-            assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
             assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
             assert any(
                 row[2] == "code_items"

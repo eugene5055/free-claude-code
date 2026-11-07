@@ -6,7 +6,6 @@ Usage: fcc-probe-models [--all] [--only PREFIX] [--url URL]
 By default it checks models never checked, dead ones older than a day and usable ones older than a week.
 """
 
-from __future__ import annotations
 
 import argparse
 import asyncio

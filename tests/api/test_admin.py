@@ -905,7 +905,9 @@ def test_admin_models_include_configured_and_cached_canonical_slugs():
 
     assert response.status_code == 200
     assert {
-        key: value for key, value in response.json().items() if key != "model_labels"
+        key: value
+        for key, value in response.json().items()
+        if key not in {"model_labels", "groups"}
     } == {
         "models": [
             "nvidia_nim/configured-model",
@@ -937,7 +939,9 @@ def test_admin_model_refresh_returns_the_updated_canonical_catalog():
 
     assert response.status_code == 200
     assert {
-        key: value for key, value in response.json().items() if key != "model_labels"
+        key: value
+        for key, value in response.json().items()
+        if key not in {"model_labels", "groups"}
     } == {
         "models": ["deepseek/deepseek-chat", "deepseek/deepseek-reasoner"],
         "failed_providers": [],
@@ -960,7 +964,9 @@ def test_admin_model_refresh_reports_partial_provider_failures():
 
     assert response.status_code == 200
     assert {
-        key: value for key, value in response.json().items() if key != "model_labels"
+        key: value
+        for key, value in response.json().items()
+        if key not in {"model_labels", "groups"}
     } == {
         "models": ["deepseek/deepseek-chat"],
         "failed_providers": ["open_router"],

@@ -329,9 +329,44 @@ async def database_factory():
 @pytest.fixture(autouse=True)
 def _isolated_context_vault(tmp_path_factory, monkeypatch):
     """Tests never write the real context vault (~/.fcc/context_vault.sqlite3)."""
-    monkeypatch.setenv("FCC_CONTEXT_VAULT", str(tmp_path_factory.mktemp("vault") / "vault.sqlite3"))
+    monkeypatch.setenv(
+        "FCC_CONTEXT_VAULT", str(tmp_path_factory.mktemp("vault") / "vault.sqlite3")
+    )
     yield
     from free_claude_code.application import context_vault
 
     if context_vault._default is not None:
         context_vault._default.close()
+
+
+@pytest.fixture(autouse=True)
+def _upstream_fallback_policy(request, monkeypatch):
+    """Duo routes only to free, flat-rate and custom models (model_usability.offered). Upstream's tests use paid
+    refs like open_router/vendor/x as plain fallbacks, so they see every model as offered; tests marked
+    `duo_free_only` keep the real rule."""
+    if request.node.get_closest_marker("duo_free_only"):
+        return
+    from free_claude_code.application import model_usability
+
+    monkeypatch.setattr(
+        model_usability, "offered", lambda ref: not model_usability.blocked(ref)
+    )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_duo_state_caches(monkeypatch):
+    """Duo's state stores cache what they read per config path. pytest deletes a passed test's tmp dir and hands
+    the next test the same path, so without this a rate limit recorded by one test rests a provider in the next."""
+    from free_claude_code.application import (
+        context_vault,
+        kimi_plan,
+        model_usability,
+        provider_health,
+        rate_limit_headers,
+    )
+
+    for module in (provider_health, rate_limit_headers, model_usability):
+        monkeypatch.setattr(module, "_loaded_from", None)
+    monkeypatch.setattr(model_usability, "_mtime", None)
+    monkeypatch.setattr(kimi_plan, "_cache", {"at": float("-inf"), "windows": None})
+    context_vault._RECALLED.clear()

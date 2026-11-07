@@ -6,7 +6,6 @@ inference response (OpenAI-style ``x-ratelimit-*``, Anthropic
 traffic through httpx clients, so one hook on ``AsyncClient.send`` sees them.
 """
 
-from __future__ import annotations
 
 import json
 import os

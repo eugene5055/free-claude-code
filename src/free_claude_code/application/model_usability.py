@@ -10,7 +10,6 @@ State lives in ~/.fcc/model_usability.json. Until that file exists nothing is hi
 still lists its whole catalog.
 """
 
-from __future__ import annotations
 
 import json
 import os

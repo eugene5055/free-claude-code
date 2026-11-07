@@ -553,3 +553,22 @@ def test_model_router_preserves_typed_error_for_unknown_mapped_provider(settings
     assert str(exc_info.value) == (
         f"Unknown provider_type: 'unknown'. Supported: '{supported}'"
     )
+
+
+@pytest.mark.duo_free_only
+def test_paid_fallbacks_are_skipped_and_free_ones_kept(settings):
+    """Duo: only free, flat-rate and custom models are routed to, so a paid fallback never runs."""
+    settings = Settings.model_validate(
+        settings.model_dump()
+        | {
+            "model_fallbacks": (
+                ModelFallback(model="open_router/vendor/paid"),
+                ModelFallback(model="open_router/vendor/gratis:free"),
+                ModelFallback(model="groq/backup"),
+            )
+        }
+    )
+    resolved = ModelRouter(settings).resolve("claude-2.1")
+    assert [
+        candidate.target.provider_model_ref for candidate in resolved.fallbacks
+    ] == ["open_router/vendor/gratis:free", "groq/backup"]

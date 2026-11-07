@@ -1,6 +1,9 @@
+import atexit
+import contextlib
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -38,9 +41,27 @@ def _path_without_uv() -> str:
             continue
         entry = Path(raw_entry)
         if any((entry / name).exists() for name in uv_names):
+            # uv may share a directory with sh and sed (/usr/bin on Arch): keep those through a shadow directory.
+            entries.append(_shadow_without(entry, uv_names))
             continue
         entries.append(raw_entry)
     return os.pathsep.join(entries)
+
+
+_SHADOWS: dict[Path, str] = {}
+
+
+def _shadow_without(entry: Path, names: tuple[str, ...]) -> str:
+    """A temporary directory linking every program in `entry` except `names`."""
+    if entry not in _SHADOWS:
+        shadow = Path(tempfile.mkdtemp(prefix="fcc-path-without-uv-"))
+        atexit.register(shutil.rmtree, shadow, True)
+        for child in entry.iterdir():
+            if child.name not in names:
+                with contextlib.suppress(OSError):
+                    (shadow / child.name).symlink_to(child)
+        _SHADOWS[entry] = str(shadow)
+    return _SHADOWS[entry]
 
 
 def _shell_interpreter() -> str:

@@ -11,7 +11,6 @@ The request executor uses both to switch models by itself when a provider refuse
 State lives in ~/.fcc/provider_health.json so it survives a restart of the server.
 """
 
-from __future__ import annotations
 
 import json
 import os

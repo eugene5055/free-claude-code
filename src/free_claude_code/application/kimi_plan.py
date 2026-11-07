@@ -6,7 +6,6 @@ lasted. This reads the plan's own usage endpoint so a 429 during a used-up windo
 real reset, fails fast instead of retrying, and tells the client when Kimi is back.
 """
 
-from __future__ import annotations
 
 import threading
 import time
