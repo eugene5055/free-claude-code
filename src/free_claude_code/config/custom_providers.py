@@ -49,6 +49,16 @@ class CustomProviderDefinition(BaseModel):
     # up front with "prompt is too long", so a grouped model moves to a larger sibling and Claude Code
     # compacts instead of the server truncating the prompt.
     context_window_tokens: int | None = Field(default=None, ge=1024)
+    # llama-server slot control (Chat Completions only; inert when /props has no
+    # total_slots): admission by priority, id_slot pinning, KV save/restore to the
+    # server's --slot-save-path within this many MB, and llama.cpp reasoning
+    # budgets for subagent and low-effort requests (0 turns a budget off).
+    # llama-server slot scheduling (providers/llama_slots.py). "auto" turns it on
+    # for loopback/private base URLs (local llama servers) and off elsewhere.
+    slot_scheduling: Literal["auto", "on", "off"] = "auto"
+    slot_save_budget_mb: int = Field(default=204800, ge=0)
+    subagent_thinking_budget: int = Field(default=4096, ge=0)
+    low_effort_thinking_budget: int = Field(default=1024, ge=0)
 
     @field_validator("display_name", mode="before")
     @classmethod

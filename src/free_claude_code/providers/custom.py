@@ -1,7 +1,8 @@
 """Custom endpoint resource ownership using FCC's existing wire transports."""
 
 import dataclasses
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
+from typing import Any
 
 import httpx
 import httpx2
@@ -21,9 +22,11 @@ from free_claude_code.core.openai_responses import (
 )
 from free_claude_code.core.reasoning import (
     DEFAULT_REASONING_POLICY,
+    ReasoningControl,
     ReasoningEffort,
     ReasoningPolicy,
 )
+from free_claude_code.core.safety_classifier import is_safety_classifier
 from free_claude_code.core.stream_recovery import ContinuationSeed
 from free_claude_code.providers.admission import (
     ProviderAdmissionController,
@@ -45,6 +48,19 @@ from free_claude_code.providers.failure_policy import (
     context_window_exceeded_provider_failure,
 )
 from free_claude_code.providers.history_negotiation import HistoryModeCache
+from free_claude_code.providers.llama_slots import (
+    COMMENT_KEEPALIVE,
+    MESSAGES_KEEPALIVE,
+    LlamaSlotScheduler,
+    RequestProfile,
+    SlotOptions,
+    apply_body_extras,
+    classify,
+    conversation_key,
+    is_local_url,
+    message_chain,
+    thinking_extras,
+)
 from free_claude_code.providers.model_listing import (
     extract_openai_model_infos,
     model_infos_from_ids,
@@ -129,6 +145,7 @@ class CustomProvider(BaseProvider):
         self._chat = None
         self._responses = None
         self._messages = None
+        self._slots: LlamaSlotScheduler | None = None
         if definition.api_format == "anthropic_messages":
             self._http = httpx.AsyncClient(
                 timeout=httpx.Timeout(
@@ -177,6 +194,20 @@ class CustomProvider(BaseProvider):
                 api_key_provider=credential,
             )
             if definition.api_format == "openai_chat":
+                if definition.slot_scheduling == "on" or (
+                    definition.slot_scheduling == "auto"
+                    and is_local_url(config.base_url)
+                ):
+                    self._slots = LlamaSlotScheduler(
+                        config.base_url,
+                        options=SlotOptions(
+                            save_budget_mb=definition.slot_save_budget_mb,
+                            subagent_thinking_budget=definition.subagent_thinking_budget,
+                            low_effort_thinking_budget=definition.low_effort_thinking_budget,
+                        ),
+                        name=definition.provider_id.removeprefix("custom_")[:8],
+                        api_key=config.api_key,
+                    )
                 profile = OpenAIChatProfile(
                     OpenAIChatRequestPolicy(
                         definition.provider_id,
@@ -196,6 +227,9 @@ class CustomProvider(BaseProvider):
                     log_api_error_tracebacks=config.log_api_error_tracebacks,
                     repair_tool_calls=config.repair_tool_calls,
                     endpoint_transport=openai_transport,
+                    validate_prepared_body=apply_body_extras
+                    if self._slots is not None
+                    else None,
                 )
             else:
                 self._responses = OpenAIResponsesTransport(
@@ -212,6 +246,8 @@ class CustomProvider(BaseProvider):
         return self._snapshot
 
     async def cleanup(self) -> None:
+        if self._slots is not None:
+            await self._slots.aclose()
         if self._sdk is not None:
             await self._sdk.close()
         if self._http is not None:
@@ -281,9 +317,115 @@ class CustomProvider(BaseProvider):
         }
         if limit is not None:
             self._check_context_window(input_tokens, request.max_tokens)
+        if self._slots is not None:
+            system = request.system
+            system_text = (
+                system
+                if isinstance(system, str)
+                else " ".join(
+                    getattr(block, "text", "") or "" for block in (system or [])
+                )
+            )
+            profile = self._slot_profile(
+                request_headers,
+                requested_model=response_model,
+                system_text=system_text,
+                has_tools=bool(request.tools),
+                is_classifier=is_safety_classifier(request),
+                head={
+                    "system": system
+                    if isinstance(system, str) or system is None
+                    else [block.model_dump(mode="json") for block in system],
+                    "tools": [
+                        tool.model_dump(mode="json") for tool in request.tools or []
+                    ],
+                },
+                messages=list(request.messages),
+                input_tokens=input_tokens,
+                reasoning=reasoning,
+                max_tokens=request.max_tokens,
+            )
+            return self._slots.stream(
+                profile,
+                lambda: self._stream_raw(
+                    request,
+                    input_tokens,
+                    request_id=request_id,
+                    response_model=response_model,
+                    reasoning=reasoning,
+                    model_info=model_info,
+                    continuation=continuation,
+                ),
+                keepalive=MESSAGES_KEEPALIVE,
+            )
         return self._stream_raw(
             request, input_tokens, continuation=continuation, **options
         )
+
+    def _slot_profile(
+        self,
+        headers: Mapping[str, str] | None,
+        *,
+        requested_model: str | None,
+        system_text: str,
+        has_tools: bool,
+        is_classifier: bool,
+        head: object,
+        messages: list[Any],
+        input_tokens: int,
+        reasoning: ReasoningPolicy,
+        max_tokens: int | None,
+    ) -> RequestProfile:
+        """Priority class, conversation key, prefix chain and llama extras."""
+        assert self._slots is not None
+        klass = classify(
+            headers,
+            requested_model=requested_model,
+            system_text=system_text,
+            has_tools=has_tools,
+            is_classifier=is_classifier,
+        )
+        chain = message_chain(head, messages)
+        return RequestProfile(
+            klass=klass,
+            conversation=conversation_key(headers, chain),
+            chain=chain,
+            input_tokens=input_tokens,
+            extras=thinking_extras(
+                klass,
+                effort=reasoning.effort.value if reasoning.effort else None,
+                thinking_off=reasoning.control is ReasoningControl.OFF,
+                options=self._slots.options,
+                max_tokens=max_tokens,
+            ),
+        )
+
+    def _scheduled(
+        self,
+        open_stream: Callable[[], AsyncIterator[str]],
+        *,
+        headers: Mapping[str, str] | None,
+        requested_model: str | None,
+        messages: list[Any],
+        input_tokens: int,
+        reasoning: ReasoningPolicy,
+    ) -> AsyncIterator[str]:
+        """Slot-schedule a non-Messages ingress (Chat, Responses, Gemini)."""
+        if self._slots is None or self._chat is None:
+            return open_stream()
+        profile = self._slot_profile(
+            headers,
+            requested_model=requested_model,
+            system_text="",
+            has_tools=True,
+            is_classifier=False,
+            head=None,
+            messages=messages,
+            input_tokens=input_tokens,
+            reasoning=reasoning,
+            max_tokens=None,
+        )
+        return self._slots.stream(profile, open_stream, keepalive=COMMENT_KEEPALIVE)
 
     def _stream_raw(
         self,
@@ -361,14 +503,21 @@ class CustomProvider(BaseProvider):
             )
         transport = self._chat if self._chat is not None else self._responses
         assert transport is not None
-        return transport.stream_chat(
-            request,
+        return self._scheduled(
+            lambda: transport.stream_chat(
+                request,
+                input_tokens=input_tokens,
+                endpoint_context=self,
+                request_id=request_id,
+                response_model=response_model or request.model,
+                reasoning=reasoning,
+                continuation=continuation,
+            ),
+            headers=request_headers,
+            requested_model=response_model,
+            messages=list(request.messages),
             input_tokens=input_tokens,
-            endpoint_context=self,
-            request_id=request_id,
-            response_model=response_model or request.model,
             reasoning=reasoning,
-            continuation=continuation,
         )
 
     def stream_gemini(
@@ -396,14 +545,21 @@ class CustomProvider(BaseProvider):
             )
         transport = self._chat if self._chat is not None else self._responses
         assert transport is not None
-        return transport.stream_gemini(
-            request,
+        return self._scheduled(
+            lambda: transport.stream_gemini(
+                request,
+                input_tokens=input_tokens,
+                endpoint_context=self,
+                request_id=request_id,
+                response_model=response_model or request.model,
+                reasoning=reasoning,
+                continuation=continuation,
+            ),
+            headers=request_headers,
+            requested_model=response_model,
+            messages=[],
             input_tokens=input_tokens,
-            endpoint_context=self,
-            request_id=request_id,
-            response_model=response_model or request.model,
             reasoning=reasoning,
-            continuation=continuation,
         )
 
     def stream_responses(
@@ -449,14 +605,21 @@ class CustomProvider(BaseProvider):
             )
         transport = self._chat if self._chat is not None else self._responses
         assert transport is not None
-        return transport.stream_responses(
-            request,
+        return self._scheduled(
+            lambda: transport.stream_responses(
+                request,
+                input_tokens=input_tokens,
+                endpoint_context=self,
+                request_id=request_id,
+                response_model=response_model or request.model,
+                reasoning=reasoning,
+                continuation=continuation,
+            ),
+            headers=request_headers,
+            requested_model=response_model,
+            messages=[],
             input_tokens=input_tokens,
-            endpoint_context=self,
-            request_id=request_id,
-            response_model=response_model or request.model,
             reasoning=reasoning,
-            continuation=continuation,
         )
 
     async def list_model_infos(self) -> frozenset[ProviderModelInfo]:
