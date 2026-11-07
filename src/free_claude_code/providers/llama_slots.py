@@ -342,6 +342,7 @@ class LlamaSlotScheduler:
             "saves": 0,
             "restores": 0,
             "restore_skipped": 0,
+            "head_restores": 0,
         }
 
     @property
@@ -400,10 +401,33 @@ class LlamaSlotScheduler:
         for slot in free:
             if profile.conversation and slot.resident == profile.conversation:
                 return slot
+        # A free slot already holding the same system+tools head reuses it in place.
+        if profile.chain:
+            same_head = [slot for slot in free if slot.chain and slot.chain[0] == profile.chain[0]]
+            if same_head:
+                return max(same_head, key=lambda slot: slot.last_used)
         empty = [slot for slot in free if slot.resident is None]
         if empty:
             return empty[0]
         return min(free, key=lambda slot: slot.last_used)
+
+    def _head_donor(self, slot: _Slot, profile: RequestProfile) -> str | None:
+        """A saved conversation whose system+tools head matches a conversation with nothing saved of its own.
+
+        A new Claude Code session starts with ~20K tokens of instructions and tools that the previous session
+        in the same place also started with. Restoring that session's file lets llama-server reuse the shared
+        token prefix (up to its last context checkpoint before the first difference) instead of re-reading it.
+        None when the slot already holds the same head (llama-server reuses it in place) or nothing matches."""
+        if not profile.chain:
+            return None
+        head = profile.chain[0]
+        if slot.chain and slot.chain[0] == head:
+            return None
+        for key in reversed(self._saves):
+            saved = self._saves[key]
+            if saved.chain and saved.chain[0] == head:
+                return key
+        return None
 
     def _effective(self, waiter: _Waiter, now: float) -> float:
         return waiter.klass - (now - waiter.enqueued) / AGE_SECONDS
@@ -590,7 +614,23 @@ class LlamaSlotScheduler:
             )
         saved = self._saves.get(profile.conversation)
         if saved is None:
-            return False
+            donor = self._head_donor(slot, profile)
+            if donor is None:
+                return False
+            started = time.perf_counter()
+            result = await self._slot_action(slot.id, "restore", self._saves[donor].filename)
+            if result is None:
+                return False
+            self.stats["head_restores"] += 1
+            logger.info(
+                "LLAMA_SLOTS: {} seeded slot {} with {} tokens sharing the head of {} in {:.1f}s",
+                self._name,
+                slot.id,
+                result.get("n_restored"),
+                donor[:24],
+                time.perf_counter() - started,
+            )
+            return True
         if not restore_worthwhile(saved.chain, profile.chain):
             self.stats["restore_skipped"] += 1
             return False

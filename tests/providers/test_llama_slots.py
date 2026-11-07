@@ -524,3 +524,49 @@ def test_remote_custom_provider_is_not_scheduled():
         openai_handler=lambda r: None,
     )
     assert forced._slots is None
+
+
+@pytest.mark.asyncio
+async def test_new_conversation_is_seeded_from_a_saved_one_with_the_same_head():
+    fake = FakeLlama(slots=1)
+    sched = scheduler(fake)
+    sched.release(await sched.acquire(profile(RequestClass.MAIN, "A", ("hCC", "a1", "a2"))))
+    sched.release(await sched.acquire(profile(RequestClass.MAIN, "B", ("hOther", "b1"))))
+    assert fake.calls == [("save", "0", "fcc-llama-0000.bin")]
+    # A new session C with Claude Code's head: A's file seeds the slot.
+    lease = await sched.acquire(profile(RequestClass.MAIN, "C", ("hCC", "c1")))
+    assert lease.restored
+    assert fake.calls[-1] == ("restore", "0", "fcc-llama-0000.bin")
+    assert sched.stats["head_restores"] == 1
+    sched.release(lease)
+    await sched.aclose()
+
+
+@pytest.mark.asyncio
+async def test_no_seed_when_the_slot_already_holds_the_head_or_nothing_matches():
+    fake = FakeLlama(slots=1)
+    sched = scheduler(fake)
+    sched.release(await sched.acquire(profile(RequestClass.MAIN, "A", ("hCC", "a1", "a2"))))
+    lease = await sched.acquire(profile(RequestClass.MAIN, "C", ("hCC", "c1")))
+    assert not lease.restored
+    assert [c[0] for c in fake.calls] == ["save"]
+    sched.release(lease)
+    lease = await sched.acquire(profile(RequestClass.MAIN, "D", ("hNew", "d1")))
+    assert not lease.restored
+    assert "restore" not in [c[0] for c in fake.calls]
+    sched.release(lease)
+    await sched.aclose()
+
+
+@pytest.mark.asyncio
+async def test_free_slot_with_the_same_head_is_preferred():
+    fake = FakeLlama(slots=2)
+    sched = scheduler(fake)
+    a = await sched.acquire(profile(RequestClass.MAIN, "A", ("hCC", "a1")))
+    b = await sched.acquire(profile(RequestClass.MAIN, "B", ("hOther", "b1")))
+    sched.release(b)
+    sched.release(a)
+    lease = await sched.acquire(profile(RequestClass.MAIN, "C", ("hCC", "c1")))
+    assert lease.extras["id_slot"] == a.slot
+    sched.release(lease)
+    await sched.aclose()
