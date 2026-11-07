@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from free_claude_code.core.anthropic.content import get_block_attr, get_block_type
+from free_claude_code.core.anthropic.documents import DocumentText, document_parts
 from free_claude_code.core.anthropic.image_sources import (
     portable_anthropic_image_url,
 )
@@ -24,6 +25,7 @@ class ToolResultImage:
 class DecomposedToolResult:
     parts: tuple[ToolResultText | ToolResultImage, ...]
     has_images: bool
+    has_documents: bool = False
 
 
 def decompose_tool_result_content(content: object) -> DecomposedToolResult:
@@ -38,6 +40,7 @@ def decompose_tool_result_content(content: object) -> DecomposedToolResult:
         blocks = (content,)
 
     parts: list[ToolResultText | ToolResultImage] = []
+    has_documents = False
     for block in blocks:
         block_type = get_block_type(block)
         if block_type == "text":
@@ -49,6 +52,15 @@ def decompose_tool_result_content(content: object) -> DecomposedToolResult:
         elif block_type == "image":
             source = get_block_attr(block, "source")
             parts.append(ToolResultImage(portable_anthropic_image_url(source)))
+        elif block_type == "document" and isinstance(
+            get_block_attr(block, "source"), Mapping
+        ):
+            has_documents = True
+            for part in document_parts(block):
+                if isinstance(part, DocumentText):
+                    parts.append(ToolResultText(part.text))
+                else:
+                    parts.append(ToolResultImage(part.url))
         elif isinstance(block, str):
             parts.append(ToolResultText(block))
         elif isinstance(block, Mapping):
@@ -60,4 +72,5 @@ def decompose_tool_result_content(content: object) -> DecomposedToolResult:
     return DecomposedToolResult(
         parts=result,
         has_images=any(isinstance(part, ToolResultImage) for part in result),
+        has_documents=has_documents,
     )

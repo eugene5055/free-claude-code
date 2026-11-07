@@ -24,6 +24,7 @@ REASONING_FORMATS = {
         "reasoning_object",
         "thinking",
         "chat_template",
+        "llamacpp",
     ),
     "openai_responses": ("provider_default", "native_responses"),
     "anthropic_messages": ("provider_default", "messages_manual", "messages_adaptive"),

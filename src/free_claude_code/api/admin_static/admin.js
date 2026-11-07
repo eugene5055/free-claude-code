@@ -658,6 +658,7 @@ async function openProviderDialog(providerId) {
 const CUSTOM_LABELS = {
   provider_default: "Provider default", openai_effort: "OpenAI effort", limited_effort: "Limited effort (low / medium / high)",
   reasoning_object: "Reasoning object", thinking: "Thinking on/off", chat_template: "Chat-template thinking",
+  llamacpp: "llama.cpp (Qwen effort + exact budget)",
   native_responses: "Native reasoning", messages_manual: "Token-budget thinking", messages_adaptive: "Adaptive thinking",
 };
 

@@ -26,6 +26,7 @@ from free_claude_code.core.openai_chat import (
 from free_claude_code.core.tool_schema_patterns import translate_tool_schema_patterns
 
 from .content import get_block_attr, get_block_type
+from .documents import DocumentImage, DocumentText, document_parts
 from .image_sources import AnthropicImageSourceError, portable_anthropic_image_url
 from .models import MessagesRequest
 from .request_serialization import serialize_tool_result_content
@@ -218,6 +219,17 @@ def _openai_user_image_part(block: Any) -> JsonObject:
     return {"type": "image_url", "image_url": {"url": url}}
 
 
+def _openai_document_parts(block: Any) -> list[JsonObject]:
+    """Convert one Anthropic document block to text and image_url parts locally."""
+    parts: list[JsonObject] = []
+    for part in document_parts(block):
+        if isinstance(part, DocumentText):
+            parts.append({"type": "text", "text": part.text})
+        elif isinstance(part, DocumentImage):
+            parts.append({"type": "image_url", "image_url": {"url": part.url}})
+    return parts
+
+
 @dataclass(frozen=True)
 class _OpenAIChatToolResult:
     tool_message: JsonObject
@@ -233,7 +245,15 @@ def _openai_chat_tool_result(block: Any) -> _OpenAIChatToolResult:
         raise OpenAIConversionError(str(exc)) from exc
 
     if not decomposed.has_images:
-        serialized = serialize_tool_result_content(tool_content)
+        serialized = (
+            "\n".join(
+                part.text
+                for part in decomposed.parts
+                if isinstance(part, ToolResultText)
+            )
+            if decomposed.has_documents
+            else serialize_tool_result_content(tool_content)
+        )
         return _OpenAIChatToolResult(
             tool_message={
                 "role": "tool",
@@ -763,6 +783,9 @@ class AnthropicToOpenAIConverter:
             elif block_type == "image":
                 flush_tool_results()
                 content_parts.append(_openai_user_image_part(block))
+            elif block_type == "document":
+                flush_tool_results()
+                content_parts.extend(_openai_document_parts(block))
             elif block_type == "tool_result":
                 flush_content()
                 tool_results.append(_openai_chat_tool_result(block))

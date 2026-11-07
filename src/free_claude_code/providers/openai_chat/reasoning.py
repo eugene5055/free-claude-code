@@ -141,6 +141,81 @@ class LlamaCppReasoning:
             _extra_body(body)["thinking_budget_tokens"] = budget
 
 
+# Qwen3.x chat templates accept only these reasoning_effort values and raise on
+# any other; llama.cpp maps "none" to enable_thinking=false before templating.
+_LLAMACPP_TEMPLATE_EFFORTS = {
+    ReasoningEffort.MINIMAL: "low",
+    ReasoningEffort.LOW: "low",
+    ReasoningEffort.MEDIUM: "medium",
+    ReasoningEffort.HIGH: "xhigh",
+    ReasoningEffort.XHIGH: "xhigh",
+    ReasoningEffort.MAX: "xhigh",
+}
+# Exact budgets also pick the template effort, so the prompt's guidance on how
+# long to think agrees with the hard stop.
+_LLAMACPP_BUDGET_EFFORTS = ((2_048, "low"), (8_192, "medium"))
+LLAMACPP_BUDGET_MESSAGE = (
+    "\n\nI have used my thinking budget, so I will stop thinking and answer now.\n"
+)
+
+
+def llamacpp_reasoning_fields(policy: ReasoningPolicy) -> dict[str, Any]:
+    """Map FCC reasoning intent to llama.cpp request fields for Qwen templates.
+
+    Returns one flat dict of the top-level ``reasoning_effort`` and llama.cpp's
+    ``thinking_budget_tokens`` / ``reasoning_budget_message`` extensions, for
+    any llama.cpp-facing caller:
+
+    - off / prefer-off: ``reasoning_effort="none"`` (llama.cpp disables thinking)
+    - exact budget: a template effort chosen from the budget, plus a hard stop
+    - effort: template effort low / medium / xhigh; minimal also gets a hard stop.
+      Higher efforts keep unbounded thinking, as Anthropic's adaptive mode does.
+    - on without detail: ``xhigh`` (the template default, sent explicitly)
+    - provider default: nothing, so the template default applies
+    """
+    if policy.control in {ReasoningControl.OFF, ReasoningControl.PREFER_OFF}:
+        return {"reasoning_effort": "none"}
+    if policy.budget_tokens is not None:
+        effort = next(
+            (
+                name
+                for limit, name in _LLAMACPP_BUDGET_EFFORTS
+                if policy.budget_tokens <= limit
+            ),
+            "xhigh",
+        )
+        return {
+            "reasoning_effort": effort,
+            "thinking_budget_tokens": policy.budget_tokens,
+            "reasoning_budget_message": LLAMACPP_BUDGET_MESSAGE,
+        }
+    if policy.effort is not None:
+        fields: dict[str, Any] = {
+            "reasoning_effort": _LLAMACPP_TEMPLATE_EFFORTS[policy.effort]
+        }
+        if policy.effort is ReasoningEffort.MINIMAL:
+            fields["thinking_budget_tokens"] = policy.effort.budget_tokens
+            fields["reasoning_budget_message"] = LLAMACPP_BUDGET_MESSAGE
+        return fields
+    if policy.control is ReasoningControl.ON:
+        return {"reasoning_effort": "xhigh"}
+    return {}
+
+
+@dataclass(frozen=True, slots=True)
+class LlamaCppTemplateReasoning:
+    """Encode llama.cpp + Qwen-template reasoning: named effort and exact budgets."""
+
+    off_field = ("reasoning_effort",)
+
+    def encode(self, body: dict[str, Any], policy: ReasoningPolicy) -> None:
+        for key, value in llamacpp_reasoning_fields(policy).items():
+            if key == "reasoning_effort":
+                body[key] = value
+            else:
+                _extra_body(body)[key] = value
+
+
 @dataclass(frozen=True, slots=True)
 class SplitReasoningOutput:
     """Request separate reasoning output where compute is not controllable."""
@@ -203,4 +278,5 @@ def _nested_dict(container: dict[str, Any], key: str) -> dict[str, Any]:
 
 NO_REASONING = NoReasoning()
 LLAMACPP_REASONING = LlamaCppReasoning()
+LLAMACPP_TEMPLATE_REASONING = LlamaCppTemplateReasoning()
 SPLIT_REASONING_OUTPUT = SplitReasoningOutput()

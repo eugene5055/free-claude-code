@@ -12,6 +12,7 @@ from free_claude_code.core.token_estimation import (
 )
 
 from .content import get_block_attr, get_block_type
+from .documents import document_text_and_image_tokens
 from .models import Message, NativeTokenCountMessage, SystemContent, Tool
 
 type CountMessages = Sequence[Message | NativeTokenCountMessage]
@@ -32,6 +33,12 @@ def _image_tokens(block: Any) -> int:
         if isinstance(data, str) and data:
             return estimate_image_tokens(len(data))
     return estimate_image_tokens()
+
+
+def _document_tokens(block: Any) -> int:
+    """Estimate a document as the text and page images FCC converts it to."""
+    text, image_tokens = document_text_and_image_tokens(block)
+    return estimate_text_tokens(text) + image_tokens
 
 
 def get_token_count(
@@ -78,6 +85,8 @@ def get_token_count(
                     total_tokens += 15
                 elif b_type == "image":
                     total_tokens += _image_tokens(block)
+                elif b_type == "document":
+                    total_tokens += _document_tokens(block)
                 elif b_type == "tool_result":
                     content = get_block_attr(block, "content", "")
                     tool_use_id = get_block_attr(block, "tool_use_id", "")
@@ -88,9 +97,17 @@ def get_token_count(
                         # are priced like top-level images; serializing them would
                         # count their base64 payload as text.
                         images = [p for p in content if get_block_type(p) == "image"]
-                        others = [p for p in content if get_block_type(p) != "image"]
+                        documents = [
+                            p for p in content if get_block_type(p) == "document"
+                        ]
+                        others = [
+                            p
+                            for p in content
+                            if get_block_type(p) not in ("image", "document")
+                        ]
                         total_tokens += sum(_image_tokens(image) for image in images)
-                        if others or not images:
+                        total_tokens += sum(_document_tokens(d) for d in documents)
+                        if others or not (images or documents):
                             total_tokens += estimate_text_tokens(json.dumps(others))
                     else:
                         total_tokens += estimate_text_tokens(json.dumps(content))

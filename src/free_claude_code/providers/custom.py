@@ -66,6 +66,7 @@ from free_claude_code.providers.model_listing import (
     model_infos_from_ids,
 )
 from free_claude_code.providers.openai_chat import (
+    LLAMACPP_TEMPLATE_REASONING,
     NO_REASONING,
     ChatTemplateReasoning,
     NamedEffortReasoning,
@@ -76,6 +77,7 @@ from free_claude_code.providers.openai_chat import (
     ReasoningEncoder,
     ReasoningObject,
     ThinkingObjectReasoning,
+    apply_llamacpp_request_compat,
     create_chat_client,
 )
 from free_claude_code.providers.openai_client import OpenAIRequestClient
@@ -111,7 +113,13 @@ def _reasoning_encoder(name: str) -> ReasoningEncoder:
         "reasoning_object": ReasoningObject(limited),
         "thinking": ThinkingObjectReasoning({"type": "enabled"}, {"type": "disabled"}),
         "chat_template": ChatTemplateReasoning("enable_thinking"),
+        "llamacpp": LLAMACPP_TEMPLATE_REASONING,
     }[name]
+
+
+def _request_postprocessors(name: str) -> tuple:
+    """llama.cpp servers also need the request features its endpoint drops."""
+    return (apply_llamacpp_request_compat,) if name == "llamacpp" else ()
 
 
 async def _omit_cookies(request: httpx.Request) -> None:
@@ -215,6 +223,7 @@ class CustomProvider(BaseProvider):
                         default_max_tokens=CUSTOM_DEFAULT_MAX_OUTPUT_TOKENS,
                     ),
                     _reasoning_encoder(definition.reasoning_format),
+                    postprocessors=_request_postprocessors(definition.reasoning_format),
                     reasoning_delta_fallback_field="reasoning",
                 )
                 self._chat = OpenAIChatTransport(

@@ -11,6 +11,7 @@ from .extra_body import (
     validate_extra_body_does_not_override_canonical_fields,
     validate_extra_body_does_not_override_reasoning_fields,
 )
+from .llamacpp_compat import apply_llamacpp_request_compat
 from .native_output import NativeChatStreamOutput
 from .profiles import (
     OPENAI_CHAT_PROFILES,
@@ -20,12 +21,14 @@ from .profiles import (
 )
 from .provider import OpenAIChatProvider
 from .reasoning import (
+    LLAMACPP_TEMPLATE_REASONING,
     NO_REASONING,
     ChatTemplateReasoning,
     NamedEffortReasoning,
     ReasoningEncoder,
     ReasoningObject,
     ThinkingObjectReasoning,
+    llamacpp_reasoning_fields,
 )
 from .request_policy import (
     OpenAIChatRequestPolicy,
@@ -64,6 +67,7 @@ def create_openai_chat_provider(
 
 
 __all__ = [
+    "LLAMACPP_TEMPLATE_REASONING",
     "NO_REASONING",
     "OPENAI_CHAT_PROFILES",
     "AnthropicChatStreamOutput",
@@ -83,11 +87,13 @@ __all__ = [
     "ReasoningObject",
     "ResponsesChatStreamOutput",
     "ThinkingObjectReasoning",
+    "apply_llamacpp_request_compat",
     "apply_openai_chat_body_policy",
     "build_openai_chat_request_body",
     "create_chat_client",
     "create_openai_chat_provider",
     "drop_empty_assistant_turns",
+    "llamacpp_reasoning_fields",
     "openai_v1_base_url",
     "usage_int",
     "validate_extra_body_does_not_override_canonical_fields",
