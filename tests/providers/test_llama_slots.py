@@ -33,13 +33,26 @@ class FakeLlama:
         self.props_status = props_status
         self.calls: list[tuple[str, str, str]] = []
         self.files: dict[str, int] = {}
+        self.task: int | None = None  # /slots id_task; None: no /slots endpoint
+        self.sleeping = False
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         if request.url.path == "/props":
             if self.props_status != 200:
                 return httpx.Response(self.props_status, text="not found")
             return httpx.Response(
-                200, json={"total_slots": self.slots, "model_path": "/m/q8.gguf"}
+                200,
+                json={
+                    "total_slots": self.slots,
+                    "model_path": "/m/q8.gguf",
+                    "is_sleeping": self.sleeping,
+                },
+            )
+        if request.url.path == "/slots":
+            if self.task is None:
+                return httpx.Response(404)
+            return httpx.Response(
+                200, json=[{"id": i, "id_task": self.task} for i in range(self.slots)]
             )
         if request.url.path.startswith("/slots/"):
             action = request.url.params["action"]
@@ -373,8 +386,42 @@ async def test_diverged_prefix_skips_restore_and_small_prompts_are_not_saved():
     lease = await sched.acquire(
         profile(RequestClass.MAIN, "A", ("hA", "x1", "x2", "x3"))
     )
-    assert not lease.restored
-    assert [c[0] for c in fake.calls] == ["save"]  # B (100 tokens) not saved
+    # Only the head is still shared: restored anyway (~5 s), llama-server reuses that prefix.
+    assert lease.restored
+    assert [c[0] for c in fake.calls] == ["save", "restore"]  # B (100 tokens) not saved
+    sched.release(lease)
+    lease = await sched.acquire(profile(RequestClass.MAIN, "A", ("hZ", "z1")))
+    assert not lease.restored  # nothing in common
+    sched.release(lease)
+    await sched.aclose()
+
+
+@pytest.mark.asyncio
+async def test_restarted_or_sleeping_server_restores_the_resident_conversation():
+    fake = FakeLlama(slots=1)
+    fake.task = 500
+    sched = scheduler(fake)
+    a = ("hA", "a1", "a2")
+    sched.release(await sched.acquire(profile(RequestClass.MAIN, "A", a)))
+    sched.release(await sched.acquire(profile(RequestClass.MAIN, "B", ("hB", "b1"))))
+    sched.release(await sched.acquire(profile(RequestClass.MAIN, "A", (*a, "a3"))))
+    assert [c[0] for c in fake.calls] == ["save", "save", "restore"]
+    fake.calls.clear()
+    fake.task = 600
+    lease = await sched.acquire(profile(RequestClass.MAIN, "A", (*a, "a3", "a4")))
+    assert not lease.restored and fake.calls == []  # still resident: no KV movement
+    sched.release(lease)
+    fake.task = -1  # llama-server restarted: task ids start over, the slot is empty
+    lease = await sched.acquire(profile(RequestClass.MAIN, "A", (*a, "a3", "a4", "a5")))
+    assert lease.restored and [c[0] for c in fake.calls] == ["restore"]
+    assert sched.stats["server_resets"] == 1
+    sched.release(lease)
+    fake.calls.clear()
+    fake.sleeping = True  # asleep after --sleep-idle-seconds: its KV is gone too
+    lease = await sched.acquire(
+        profile(RequestClass.MAIN, "A", (*a, "a3", "a4", "a5", "a6"))
+    )
+    assert lease.restored and [c[0] for c in fake.calls] == ["restore"]
     sched.release(lease)
     await sched.aclose()
 
@@ -530,8 +577,12 @@ def test_remote_custom_provider_is_not_scheduled():
 async def test_new_conversation_is_seeded_from_a_saved_one_with_the_same_head():
     fake = FakeLlama(slots=1)
     sched = scheduler(fake)
-    sched.release(await sched.acquire(profile(RequestClass.MAIN, "A", ("hCC", "a1", "a2"))))
-    sched.release(await sched.acquire(profile(RequestClass.MAIN, "B", ("hOther", "b1"))))
+    sched.release(
+        await sched.acquire(profile(RequestClass.MAIN, "A", ("hCC", "a1", "a2")))
+    )
+    sched.release(
+        await sched.acquire(profile(RequestClass.MAIN, "B", ("hOther", "b1")))
+    )
     assert fake.calls == [("save", "0", "fcc-llama-0000.bin")]
     # A new session C with Claude Code's head: A's file seeds the slot.
     lease = await sched.acquire(profile(RequestClass.MAIN, "C", ("hCC", "c1")))
@@ -546,7 +597,9 @@ async def test_new_conversation_is_seeded_from_a_saved_one_with_the_same_head():
 async def test_no_seed_when_the_slot_already_holds_the_head_or_nothing_matches():
     fake = FakeLlama(slots=1)
     sched = scheduler(fake)
-    sched.release(await sched.acquire(profile(RequestClass.MAIN, "A", ("hCC", "a1", "a2"))))
+    sched.release(
+        await sched.acquire(profile(RequestClass.MAIN, "A", ("hCC", "a1", "a2")))
+    )
     lease = await sched.acquire(profile(RequestClass.MAIN, "C", ("hCC", "c1")))
     assert not lease.restored
     assert [c[0] for c in fake.calls] == ["save"]

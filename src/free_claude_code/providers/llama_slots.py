@@ -160,11 +160,13 @@ def common_prefix(a: tuple[str, ...], b: tuple[str, ...]) -> int:
 
 
 def restore_worthwhile(saved: tuple[str, ...], new: tuple[str, ...]) -> bool:
-    """The saved chain must share the system head and at least half its messages."""
+    """The saved chain shares at least the system head: llama-server then reuses the common token prefix.
+
+    2026-11-07: this asked for half the messages too, so a conversation whose early messages changed (compaction)
+    re-read its whole prompt: 8K+ new tokens took 176-419 s on the RTX 4090+5090 server, a restore ~5 s."""
     if not saved or not new:
         return False
-    shared = common_prefix(saved, new)
-    return shared >= 1 and shared >= max(2, (len(saved) + 1) // 2)
+    return common_prefix(saved, new) >= 1
 
 
 def is_local_url(url: str) -> bool:
@@ -336,6 +338,7 @@ class LlamaSlotScheduler:
         self._next_name = 0
         self._save_supported: bool | None = None
         self._save_checked_at = -1e18
+        self._top_task: int | None = None
         self.stats: dict[str, float] = {
             "granted": 0,
             "queued": 0,
@@ -343,6 +346,7 @@ class LlamaSlotScheduler:
             "restores": 0,
             "restore_skipped": 0,
             "head_restores": 0,
+            "server_resets": 0,
         }
 
     @property
@@ -393,6 +397,44 @@ class LlamaSlotScheduler:
         self._enabled = True
         self._grant_waiters()
 
+    def _forget_residents(self, why: str) -> None:
+        if any(slot.resident for slot in self._slots):
+            self.stats["server_resets"] += 1
+            logger.info(
+                "LLAMA_SLOTS: {} {}; its slots are empty, conversations restore from their saves",
+                self._name,
+                why,
+            )
+        for slot in self._slots:
+            if not slot.busy:
+                slot.resident, slot.chain, slot.tokens = None, (), 0
+
+    async def _check_server(self) -> None:
+        """A restarted or sleeping llama-server holds no KV, while FCC still thought each slot held its
+        conversation, so that conversation skipped its restore and re-read its whole prompt (2026-11-07: the
+        server restarted ~30 times in a day). A restart resets llama-server's task ids; sleep says so in /props."""
+        try:
+            response = await self._http.get(f"{self._root}/slots", timeout=5.0)
+            if response.status_code != 200:
+                return
+            top = max(
+                (int(item.get("id_task") or -1) for item in response.json()), default=-1
+            )
+        except Exception:  # an optimisation only
+            return
+        if self._top_task is not None and top < self._top_task:
+            self._forget_residents("restarted")
+        self._top_task = top
+        try:
+            props = await self._http.get(f"{self._root}/props", timeout=5.0)
+            sleeping = props.status_code == 200 and bool(
+                props.json().get("is_sleeping")
+            )
+        except Exception:
+            return
+        if sleeping:
+            self._forget_residents("is asleep")
+
     # -------------------------------------------------------------- admission
     def _free_slots(self) -> list[_Slot]:
         return [slot for slot in self._slots[: self._capacity] if not slot.busy]
@@ -403,7 +445,11 @@ class LlamaSlotScheduler:
                 return slot
         # A free slot already holding the same system+tools head reuses it in place.
         if profile.chain:
-            same_head = [slot for slot in free if slot.chain and slot.chain[0] == profile.chain[0]]
+            same_head = [
+                slot
+                for slot in free
+                if slot.chain and slot.chain[0] == profile.chain[0]
+            ]
             if same_head:
                 return max(same_head, key=lambda slot: slot.last_used)
         empty = [slot for slot in free if slot.resident is None]
@@ -462,6 +508,8 @@ class LlamaSlotScheduler:
         """Wait for a slot (by priority) and prepare its KV cache."""
         async with self._lock:
             await self._refresh()
+            if self._enabled:
+                await self._check_server()
         if not self._enabled:
             return SlotLease(slot=None, extras=profile.extras)
         started = self._clock()
@@ -618,7 +666,9 @@ class LlamaSlotScheduler:
             if donor is None:
                 return False
             started = time.perf_counter()
-            result = await self._slot_action(slot.id, "restore", self._saves[donor].filename)
+            result = await self._slot_action(
+                slot.id, "restore", self._saves[donor].filename
+            )
             if result is None:
                 return False
             self.stats["head_restores"] += 1
@@ -631,7 +681,14 @@ class LlamaSlotScheduler:
                 time.perf_counter() - started,
             )
             return True
-        if not restore_worthwhile(saved.chain, profile.chain):
+        if (
+            not restore_worthwhile(saved.chain, profile.chain)
+            or (
+                common_prefix(saved.chain, profile.chain) == 1
+                and slot.chain
+                and slot.chain[0] == profile.chain[0]
+            )
+        ):  # nothing in common, or only the head the slot already holds (llama-server reuses it in place)
             self.stats["restore_skipped"] += 1
             return False
         started = time.perf_counter()
