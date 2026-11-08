@@ -114,7 +114,8 @@ def test_super_fallback_migration_preserves_order_reasoning_and_distinct_keys(
         (entry.target.provider_model_ref, entry.target.api_key_number)
         for entry in route.fallbacks
     ] == [
-        (_ULTRA_REF, 2),
+        # Nemotron Ultra is blocked by model_usability (user 2026-11-08), so
+        # the router skips it and only the non-Nemotron fallback remains.
         ("groq/backup", 1),
     ]
 

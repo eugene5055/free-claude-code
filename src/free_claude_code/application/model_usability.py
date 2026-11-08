@@ -105,12 +105,21 @@ def is_free(provider_model_ref: str) -> bool:
     return provider in FREE_PROVIDERS
 
 
-# Never offered on any provider (user, 2026-10-22; Duo's model_selection.BLOCKED is the same rule).
-_BLOCKED = re.compile(r"nemotron-[0-9.]+-(super|lightning)", re.IGNORECASE)
+# Never offered on any provider: Super and Lightning (user, 2026-10-22) and Ultra (too slow; user, 2026-11-08: "it
+# should have been removed everywhere"). Duo's model_selection.BLOCKED is the same rule.
+_BLOCKED = re.compile(r"nemotron-[0-9.]+-(super|lightning|ultra)", re.IGNORECASE)
+# Below the 45-point LLM Stats floor (llm-stats.com, read 2026-11-08; user: "enforce our 45 minimum llm score"):
+# gpt-oss 120B 28.3 / 20B 17.4, North Mini Code 21.6, Qwen3.8-27B 44.0, Devstral 13.0, Gemma 4 <=32.6, Llama 3.x,
+# Mistral Small/Medium, Magistral, Ministral, Pixtral, every other Nemotron. Duo's model_score holds the full table.
+_BELOW_FLOOR = re.compile(
+    r"nemotron|gpt-oss-|north-mini-code|devstral|qwen3\.8-27b|(^|/)gemma-?[0-9]|(^|/)llama-?[0-9]|"
+    r"mistral-(small|medium)|magistral|ministral|pixtral",
+    re.IGNORECASE,
+)
 
 
 def blocked(provider_model_ref: str) -> bool:
-    return bool(_BLOCKED.search(provider_model_ref))
+    return bool(_BLOCKED.search(provider_model_ref) or _BELOW_FLOOR.search(provider_model_ref))
 
 
 def offered(provider_model_ref: str) -> bool:
