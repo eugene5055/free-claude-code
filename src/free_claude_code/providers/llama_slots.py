@@ -436,6 +436,10 @@ class LlamaSlotScheduler:
             self._forget_residents("is asleep")
 
     # -------------------------------------------------------------- admission
+    def waiting(self) -> int:
+        """Requests queued for a slot right now."""
+        return sum(1 for w in self._waiters if not w.future.done())
+
     def _free_slots(self) -> list[_Slot]:
         return [slot for slot in self._slots[: self._capacity] if not slot.busy]
 

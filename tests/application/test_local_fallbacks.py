@@ -167,3 +167,45 @@ def test_local_provider_ids_from_settings():
     assert {"lmstudio", "llamacpp"} <= ids
     assert "nvidia_nim" not in ids and "openrouter" not in ids
     assert local_provider_ids(None) == frozenset()
+
+
+CLOUD = "kimi_code"
+CLOUD_2 = "cloudflare"
+
+
+@pytest.fixture
+def queues(monkeypatch):
+    depth: dict[str, int] = {}
+    monkeypatch.setattr(provider_health, "_QUEUES", {})
+    for pid in (LOCAL, LOCAL_2):
+        provider_health.register_queue(pid, lambda pid=pid: depth.get(pid, 0))
+    return depth
+
+
+def _order(configured, monkeypatch, limited=()):
+    monkeypatch.setattr(provider_health, "limited_until",
+                        lambda pid, now=None: (now or 0) + 600 if pid in limited else None)
+    monkeypatch.setattr(provider_health, "proven_models", lambda *a, **k: [])
+    candidates, _, spare = execution._ordered_candidates(
+        tuple(configured), auto_fallbacks=True, request_id="r", local_providers=LOCALS)
+    return [c.target.provider_id for _, c in candidates]
+
+
+def test_a_busy_local_queue_yields_to_other_free_providers(queues, monkeypatch):
+    chain = [_candidate(CLOUD, "k"), _candidate(LOCAL, "l"), _candidate(CLOUD_2, "c")]
+    assert _order(chain, monkeypatch) == [CLOUD, LOCAL, CLOUD_2]
+    queues[LOCAL] = 2
+    assert _order(chain, monkeypatch) == [CLOUD, CLOUD_2, LOCAL]
+
+
+def test_a_busy_local_queue_still_beats_rate_limited_providers(queues, monkeypatch):
+    queues[LOCAL] = 5
+    chain = [_candidate(CLOUD, "k"), _candidate(LOCAL, "l"), _candidate(CLOUD_2, "c")]
+    assert _order(chain, monkeypatch, limited={CLOUD, CLOUD_2}) == [LOCAL, CLOUD, CLOUD_2]
+    assert _order(chain, monkeypatch, limited={CLOUD}) == [CLOUD_2, LOCAL, CLOUD]
+
+
+def test_a_request_for_local_itself_keeps_waiting_in_its_queue(queues, monkeypatch):
+    queues[LOCAL] = 5
+    assert _order([_candidate(LOCAL, "l"), _candidate(CLOUD, "k")], monkeypatch) == [LOCAL, CLOUD]
+    assert _order([_candidate(LOCAL, "l"), _candidate(LOCAL_2, "m")], monkeypatch) == [LOCAL, LOCAL_2]

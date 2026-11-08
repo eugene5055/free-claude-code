@@ -161,3 +161,26 @@ def snapshot() -> dict:
     with _lock:
         _load()
         return json.loads(json.dumps(_state))
+
+
+# Local queues (2026-11-07): Kimi and Cloudflare 429s sent their fallbacks to duo-local-combined, 8 requests queued on
+# its 2 slots and one waited 670 s. A fallback skips a local provider whose queue is this deep, unless nothing else is free.
+BUSY_QUEUE = 2
+_QUEUES: dict[str, object] = {}
+
+
+def register_queue(provider_id: str, depth) -> None:
+    """Report how many requests wait for provider_id (a callable returning an int), e.g. a llama-server slot queue."""
+    _QUEUES[provider_id] = depth
+
+
+def queue_depth(provider_id: str) -> int:
+    depth = _QUEUES.get(provider_id)
+    try:
+        return int(depth()) if callable(depth) else 0
+    except Exception:
+        return 0
+
+
+def busy(provider_id: str) -> bool:
+    return queue_depth(provider_id) >= BUSY_QUEUE

@@ -787,16 +787,35 @@ def _ordered_candidates(
             target = ProviderModelTarget(provider_id=provider_id, provider_model=provider_model, provider_model_ref=ref)
             pool.append((len(entries) + offset, ProviderModelCandidate(target)))
             automatic.add(ref)
+    all_local = bool(configured) and all(c.target.provider_id in local_providers for c in configured)
+    queued: list[tuple[int, ProviderModelCandidate]] = []
+    if not all_local:
+        # A busy local queue yields: its fallbacks go after every other free candidate (never the first one asked for).
+        def yields(entry: tuple[int, ProviderModelCandidate]) -> bool:
+            pid = entry[1].target.provider_id
+            return entry[0] != 0 and pid in local_providers and provider_health.busy(pid)
+
+        queued = [e for e in free + pool if yields(e)]
+        if queued:
+            free = [e for e in free if e not in queued]
+            pool = [e for e in pool if e not in queued]
+            logger.info(
+                "Local queue: request_id={} {} has {} waiting; other providers are tried first",
+                request_id,
+                queued[0][1].target.provider_model_ref,
+                provider_health.queue_depth(queued[0][1].target.provider_id),
+            )
     if limited:
         logger.info(
             "Rate limit: request_id={} tries {} first; {} rests until {}",
             request_id,
-            (free or pool or limited)[0][1].target.provider_model_ref,
+            (free or pool or queued or limited)[0][1].target.provider_model_ref,
             ", ".join(sorted({e[1].target.provider_id for e in limited})),
             time.strftime("%H:%M:%S", time.localtime(min(rests[e[1].target.provider_id] for e in limited))),
         )
-        return free + pool + limited, automatic, []
-    return free, automatic, pool
+        return free + pool + queued + limited, automatic, []
+    return free + [e for e in queued if e[1].target.provider_model_ref not in automatic], automatic, pool + [
+        e for e in queued if e[1].target.provider_model_ref in automatic]
 
 
 def _insert_spare(
