@@ -165,7 +165,10 @@ def snapshot() -> dict:
 
 # Local queues (2026-11-07): Kimi and Cloudflare 429s sent their fallbacks to duo-local-combined, 8 requests queued on
 # its 2 slots and one waited 670 s. A fallback skips a local provider whose queue is this deep, unless nothing else is free.
-BUSY_QUEUE = 2
+# A local provider is busy once its slots are all taken (the queue reports pressure: waiting + 1 when full). At 2 a
+# cloud 429 fallback still queued behind both duo-local-combined slots and Duo's local jobs stalled out waiting
+# (2026-11-08); now fallbacks take a local slot only when one is free and otherwise try the next free provider.
+BUSY_QUEUE = 1
 _QUEUES: dict[str, object] = {}
 
 

@@ -217,7 +217,7 @@ class CustomProvider(BaseProvider):
                         name=definition.provider_id.removeprefix("custom_")[:8],
                         api_key=config.api_key,
                     )
-                    provider_health.register_queue(definition.provider_id, self._slots.waiting)
+                    provider_health.register_queue(definition.provider_id, self._slots.pressure)
                 profile = OpenAIChatProfile(
                     OpenAIChatRequestPolicy(
                         definition.provider_id,

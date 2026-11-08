@@ -209,3 +209,22 @@ def test_a_request_for_local_itself_keeps_waiting_in_its_queue(queues, monkeypat
     queues[LOCAL] = 5
     assert _order([_candidate(LOCAL, "l"), _candidate(CLOUD, "k")], monkeypatch) == [LOCAL, CLOUD]
     assert _order([_candidate(LOCAL, "l"), _candidate(LOCAL_2, "m")], monkeypatch) == [LOCAL, LOCAL_2]
+
+
+def test_a_full_local_server_is_busy_even_with_no_queue(queues, monkeypatch):
+    chain = [_candidate(CLOUD, "k"), _candidate(LOCAL, "l"), _candidate(CLOUD_2, "c")]
+    queues[LOCAL] = 1  # both slots taken, nothing waiting yet
+    assert _order(chain, monkeypatch) == [CLOUD, CLOUD_2, LOCAL]
+
+
+def test_slot_pressure_counts_a_full_server():
+    from free_claude_code.providers.llama_slots import LlamaSlotScheduler, SlotOptions
+    sched = LlamaSlotScheduler("http://127.0.0.1:9/v1", options=SlotOptions())
+    assert sched.pressure() == 0  # capacity not probed yet: never busy by guess
+    from free_claude_code.providers.llama_slots import _Slot
+    sched._slots, sched._capacity = [_Slot(id=0), _Slot(id=1)], 2
+    assert sched.pressure() == 0
+    sched._slots[0].busy = True
+    assert sched.pressure() == 0  # one slot still free
+    sched._slots[1].busy = True
+    assert sched.pressure() == 1

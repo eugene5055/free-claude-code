@@ -440,6 +440,11 @@ class LlamaSlotScheduler:
         """Requests queued for a slot right now."""
         return sum(1 for w in self._waiters if not w.future.done())
 
+    def pressure(self) -> int:
+        """Queued requests, plus one when every known slot is taken: a cloud fallback only gets a slot that is free now."""
+        full = self._capacity > 0 and not self._free_slots()
+        return self.waiting() + (1 if full else 0)
+
     def _free_slots(self) -> list[_Slot]:
         return [slot for slot in self._slots[: self._capacity] if not slot.busy]
 
