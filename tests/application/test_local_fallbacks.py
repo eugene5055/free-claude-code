@@ -186,7 +186,7 @@ def _order(configured, monkeypatch, limited=()):
     monkeypatch.setattr(provider_health, "limited_until",
                         lambda pid, now=None: (now or 0) + 600 if pid in limited else None)
     monkeypatch.setattr(provider_health, "proven_models", lambda *a, **k: [])
-    candidates, _, spare = execution._ordered_candidates(
+    candidates, _, _ = execution._ordered_candidates(
         tuple(configured), auto_fallbacks=True, request_id="r", local_providers=LOCALS)
     return [c.target.provider_id for _, c in candidates]
 
