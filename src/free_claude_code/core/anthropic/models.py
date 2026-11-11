@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class _AnthropicBlockBase(BaseModel):
@@ -78,6 +78,79 @@ class SystemContent(_AnthropicBlockBase):
     text: str
 
 
+_KNOWN_BLOCK_TYPES = frozenset(
+    {
+        "text",
+        "image",
+        "document",
+        "tool_use",
+        "tool_result",
+        "thinking",
+        "redacted_thinking",
+        "server_tool_use",
+        "web_search_tool_result",
+        "web_fetch_tool_result",
+    }
+)
+
+
+def _fold_tool_change_blocks(data: Any) -> Any:
+    """Fold mid-conversation tool changes into ``tools``.
+
+    Claude Code announces tools that load after the first turn with
+    ``tool_addition`` / ``tool_removal`` blocks inside a system-role message.
+    Providers behind this gateway only understand the top-level ``tools`` list,
+    so apply the changes there in order and drop the blocks. Any other block
+    type this gateway does not know is dropped too, instead of failing the
+    whole request with a 422.
+    """
+    if not isinstance(data, dict) or not isinstance(data.get("messages"), list):
+        return data
+    tools = data.get("tools")
+    tools = list(tools) if isinstance(tools, list) else []
+    changed = False
+    messages: list[Any] = []
+    for message in data["messages"]:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            messages.append(message)
+            continue
+        kept: list[Any] = []
+        for block in content:
+            kind = block.get("type") if isinstance(block, dict) else None
+            if not isinstance(block, dict) or kind in _KNOWN_BLOCK_TYPES:
+                kept.append(block)
+                continue
+            changed = True
+            tool = block.get("tool")
+            if not isinstance(tool, dict):
+                continue
+            if kind == "tool_addition":
+                definition = tool.get("definition", tool)
+                name = definition.get("name") if isinstance(definition, dict) else None
+                if isinstance(name, str) and not any(
+                    isinstance(t, dict) and t.get("name") == name for t in tools
+                ):
+                    tools.append(definition)
+            elif kind == "tool_removal":
+                name = tool.get("name")
+                tools = [
+                    t
+                    for t in tools
+                    if not (isinstance(t, dict) and t.get("name") == name)
+                ]
+        if len(kept) == len(content):
+            messages.append(message)
+        elif kept:
+            messages.append({**message, "content": kept})
+    if not changed:
+        return data
+    data = {**data, "messages": messages}
+    if tools or "tools" in data:
+        data["tools"] = tools
+    return data
+
+
 class Message(BaseModel):
     role: Literal["user", "assistant", "system"]
     content: (
@@ -142,6 +215,11 @@ class MessagesRequest(BaseModel):
     speed: str | None = Field(default=None, exclude=True)
     betas: list[str] | None = Field(default=None, exclude=True)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_tool_changes(cls, data: Any) -> Any:
+        return _fold_tool_change_blocks(data)
+
     @field_validator("max_tokens", mode="before")
     @classmethod
     def _reject_boolean_output_limit(cls, value: object) -> object:
@@ -167,6 +245,11 @@ class TokenCountRequest(BaseModel):
     output_config: dict[str, Any] | None = None
     mcp_servers: list[dict[str, Any]] | None = None
     betas: list[str] | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_tool_changes(cls, data: Any) -> Any:
+        return _fold_tool_change_blocks(data)
 
 
 class TokenCountResponse(BaseModel):
